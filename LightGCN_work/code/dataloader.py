@@ -244,8 +244,8 @@ class Loader(BasicDataset):
                     l = l.strip().split()
                     items = [int(i) for i in l[1:]]
                     if not items:
-+                       continue
-+                   self.m_item = max(self.m_item, max(items))
+                        continue
+                    self.m_item = max(self.m_item, max(items))
                     uid = int(l[0])
                     trainUniqueUsers.append(uid)
                     trainUser.extend([uid] * len(items))
@@ -263,8 +263,8 @@ class Loader(BasicDataset):
                     l = l.split()
                     items = [int(i) for i in l[1:]]
                     if not items:
-+                       continue
-+                   self.m_item = max(self.m_item, max(items))
+                        continue
+                    self.m_item = max(self.m_item, max(items))
                     uid = int(l[0])
                     testUniqueUsers.append(uid)
                     testUser.extend([uid] * len(items))
