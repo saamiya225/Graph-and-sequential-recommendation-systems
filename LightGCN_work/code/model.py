@@ -165,9 +165,21 @@ class LightGCN(BasicModel):
             else:
                 all_emb = torch.sparse.mm(g_droped, all_emb)
             embs.append(all_emb)
+        # stack layer embeddings: [n_nodes, K+1, dim]
         embs = torch.stack(embs, dim=1)
-        #print(embs.size())
-        light_out = torch.mean(embs, dim=1)
+        # per-node adaptive combination via degree ---
+        import numpy as _np
+        # build deg_u, deg_i from your dataset’s trainUser/trainItem lists
+        u_arr = _np.array(self.dataset.trainUser, dtype=_np.int64)
+        i_arr = _np.array(self.dataset.trainItem, dtype=_np.int64)
+        deg_u = _np.bincount(u_arr, minlength=self.num_users)
+        deg_i = _np.bincount(i_arr, minlength=self.num_items)
+        deg  = _np.concatenate([deg_u, deg_i]).astype(_np.float32)
+        deg_t = torch.from_numpy(deg).to(embs.device)                 # [n_nodes]
+        alpha = deg_t.view(-1,1).repeat(1, self.n_layers+1)          # [n_nodes,K+1]
+        alpha = alpha / alpha.sum(dim=1, keepdim=True)               # normalize per-row
+        # weighted sum over the layer dimension
+        light_out = torch.sum(embs * alpha.unsqueeze(2), dim=1)
         users, items = torch.split(light_out, [self.num_users, self.num_items])
         return users, items
     
