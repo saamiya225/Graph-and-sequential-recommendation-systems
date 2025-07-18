@@ -146,8 +146,16 @@ class LightGCN(BasicModel):
         return users_final, items_final
 
     def getUsersRating(self, users):
-        users_emb, items_emb = self.computer()
-        return torch.sum(users_emb[users.long()] * items_emb, dim=1)
+        """
+        Given a batch of user indices, returns a [batch, n_items] score matrix.
+        """
+        # 1) propagate once to get all user/item embeddings
+        users_emb, items_emb = self.computer()     # users_emb: [n_users, D], items_emb: [n_items, D]
+        # 2) select only the batch of users
+        u_e = users_emb[users.long()]             # [batch, D]
+        # 3) score = u_e @ items_emb^T → [batch, n_items]
+        scores = torch.matmul(u_e, items_emb.t())
+        return scores
 
     def bpr_loss(self, users, pos, neg):
         users_emb, items_emb = self.computer()
