@@ -46,6 +46,7 @@ config['decay'] = args.decay
 config['pretrain'] = args.pretrain
 config['A_split'] = False
 config['bigdata'] = False
+config['exp_smooth_beta'] = args.exp_smooth_beta
 
 GPU = torch.cuda.is_available()
 device = torch.device('cuda' if GPU else "cpu")
