@@ -4,8 +4,6 @@ Pytorch Implementation of LightGCN in
 Xiangnan He et al. LightGCN: Simplifying and Powering Graph Convolution Network for Recommendation
 
 @author: Jianbai Ye (gusye@mail.ustc.edu.cn)
-
-Define models here
 """
 import world
 import torch
@@ -86,25 +84,21 @@ class LightGCN(BasicModel):
                  dataset:BasicDataset):
         super(LightGCN, self).__init__()
         self.config = config
-        self.dataset : dataloader.BasicDataset = dataset
+        self.dataset = dataset
         self.__init_weight()
 
     def __init_weight(self):
         self.num_users  = self.dataset.n_users
         self.num_items  = self.dataset.m_items
         self.latent_dim = self.config['latent_dim_rec']
-        self.n_layers = self.config['lightGCN_n_layers']
-        self.keep_prob = self.config['keep_prob']
-        self.A_split = self.config['A_split']
+        self.n_layers   = self.config['lightGCN_n_layers']
+        self.keep_prob  = self.config['keep_prob']
+        self.A_split    = self.config['A_split']
         self.embedding_user = torch.nn.Embedding(
             num_embeddings=self.num_users, embedding_dim=self.latent_dim)
         self.embedding_item = torch.nn.Embedding(
             num_embeddings=self.num_items, embedding_dim=self.latent_dim)
         if self.config['pretrain'] == 0:
-#             nn.init.xavier_uniform_(self.embedding_user.weight, gain=1)
-#             nn.init.xavier_uniform_(self.embedding_item.weight, gain=1)
-#             print('use xavier initilizer')
-# random normal init seems to be a better choice when lightGCN actually don't use any non-linear activation function
             nn.init.normal_(self.embedding_user.weight, std=0.1)
             nn.init.normal_(self.embedding_item.weight, std=0.1)
             world.cprint('use NORMAL distribution initilizer')
@@ -114,9 +108,8 @@ class LightGCN(BasicModel):
             print('use pretarined data')
         self.f = nn.Sigmoid()
         self.Graph = self.dataset.getSparseGraph()
-        print(f"lgn is already to go(dropout:{self.config['dropout']})")
+        print(f"lgn is ready to go(dropout:{self.config['dropout']})")
 
-        # print("save_txt")
     def __dropout_x(self, x, keep_prob):
         size = x.size()
         index = x.indices().t()
@@ -125,103 +118,71 @@ class LightGCN(BasicModel):
         random_index = random_index.int().bool()
         index = index[random_index]
         values = values[random_index]/keep_prob
-        g = torch.sparse.FloatTensor(index.t(), values, size)
-        return g
+        return torch.sparse.FloatTensor(index.t(), values, size)
     
     def __dropout(self, keep_prob):
         if self.A_split:
-            graph = []
-            for g in self.Graph:
-                graph.append(self.__dropout_x(g, keep_prob))
+            graph = [self.__dropout_x(g, keep_prob) for g in self.Graph]
         else:
             graph = self.__dropout_x(self.Graph, keep_prob)
         return graph
     
     def computer(self):
         """
-        propagate methods for lightGCN
-        """       
+        Graph propagation + global exponential smoothing over layers.
+        Returns:
+          users_final: Tensor [n_users, emb_dim]
+          items_final: Tensor [n_items, emb_dim]
+        """
+        # 1) initial embeddings
         users_emb = self.embedding_user.weight
         items_emb = self.embedding_item.weight
-        all_emb = torch.cat([users_emb, items_emb])
-        #   torch.split(all_emb , [self.num_users, self.num_items])
+        all_emb = torch.cat([users_emb, items_emb], dim=0)
+
         embs = [all_emb]
-        if self.config['dropout']:
-            if self.training:
-                print("droping")
-                g_droped = self.__dropout(self.keep_prob)
-            else:
-                g_droped = self.Graph        
+
+        # 2) propagate for each layer
+        if self.config['dropout'] and self.training:
+            g = self.__dropout(self.keep_prob)
         else:
-            g_droped = self.Graph    
-        
-        for layer in range(self.n_layers):
+            g = self.Graph
+
+        for _ in range(self.n_layers):
             if self.A_split:
-                temp_emb = []
-                for f in range(len(g_droped)):
-                    temp_emb.append(torch.sparse.mm(g_droped[f], all_emb))
-                side_emb = torch.cat(temp_emb, dim=0)
-                all_emb = side_emb
+                parts = [torch.sparse.mm(graph_part, all_emb) for graph_part in g]
+                all_emb = torch.cat(parts, dim=0)
             else:
-                all_emb = torch.sparse.mm(g_droped, all_emb)
+                all_emb = torch.sparse.mm(g, all_emb)
             embs.append(all_emb)
-        # stack layer embeddings: [n_nodes, K+1, dim]
+
+        # 3) stack embeddings: [n_nodes, n_layers+1, emb_dim]
         embs = torch.stack(embs, dim=1)
-        # per-node adaptive combination via degree ---
-        import numpy as _np
-        # build deg_u, deg_i from your dataset’s trainUser/trainItem lists
-        u_arr = _np.array(self.dataset.trainUser, dtype=_np.int64)
-        i_arr = _np.array(self.dataset.trainItem, dtype=_np.int64)
-        deg_u = _np.bincount(u_arr, minlength=self.num_users)
-        deg_i = _np.bincount(i_arr, minlength=self.num_items)
-        deg  = _np.concatenate([deg_u, deg_i]).astype(_np.float32)
-        deg_t = torch.from_numpy(deg).to(embs.device)                 # [n_nodes]
-        alpha = deg_t.view(-1,1).repeat(1, self.n_layers+1)          # [n_nodes,K+1]
-        alpha = alpha / alpha.sum(dim=1, keepdim=True)               # normalize per-row
-        # weighted sum over the layer dimension
-        light_out = torch.sum(embs * alpha.unsqueeze(2), dim=1)
-        users, items = torch.split(light_out, [self.num_users, self.num_items])
-        return users, items
-    
-    def getUsersRating(self, users):
-        all_users, all_items = self.computer()
-        users_emb = all_users[users.long()]
-        items_emb = all_items
-        rating = self.f(torch.matmul(users_emb, items_emb.t()))
-        return rating
-    
-    def getEmbedding(self, users, pos_items, neg_items):
-        all_users, all_items = self.computer()
-        users_emb = all_users[users]
-        pos_emb = all_items[pos_items]
-        neg_emb = all_items[neg_items]
-        users_emb_ego = self.embedding_user(users)
-        pos_emb_ego = self.embedding_item(pos_items)
-        neg_emb_ego = self.embedding_item(neg_items)
-        return users_emb, pos_emb, neg_emb, users_emb_ego, pos_emb_ego, neg_emb_ego
-    
-    def bpr_loss(self, users, pos, neg):
-        (users_emb, pos_emb, neg_emb, 
-        userEmb0,  posEmb0, negEmb0) = self.getEmbedding(users.long(), pos.long(), neg.long())
-        reg_loss = (1/2)*(userEmb0.norm(2).pow(2) + 
-                         posEmb0.norm(2).pow(2)  +
-                         negEmb0.norm(2).pow(2))/float(len(users))
-        pos_scores = torch.mul(users_emb, pos_emb)
-        pos_scores = torch.sum(pos_scores, dim=1)
-        neg_scores = torch.mul(users_emb, neg_emb)
-        neg_scores = torch.sum(neg_scores, dim=1)
-        
-        loss = torch.mean(torch.nn.functional.softplus(neg_scores - pos_scores))
-        
-        return loss, reg_loss
-       
+
+        # 4) global exponential smoothing weights
+        beta = self.config.get('exp_smooth_beta', 0.5)
+        K = self.n_layers
+        device = embs.device
+        weights = [(1 - beta) ** k for k in range(K + 1)]
+        w = torch.tensor(weights, dtype=embs.dtype, device=device)
+        w = w / w.sum()
+
+        # 5) weighted sum over layers → [n_nodes, emb_dim]
+        light_out = torch.sum(embs * w.view(1, K + 1, 1), dim=1)
+
+        # 6) split back into users & items
+        users_final, items_final = torch.split(
+            light_out,
+            [self.num_users, self.num_items],
+            dim=0
+        )
+        return users_final, items_final
+
     def forward(self, users, items):
-        # compute embedding
-        all_users, all_items = self.computer()
-        # print('forward')
-        #all_users, all_items = self.computer()
-        users_emb = all_users[users]
-        items_emb = all_items[items]
-        inner_pro = torch.mul(users_emb, items_emb)
-        gamma     = torch.sum(inner_pro, dim=1)
-        return gamma
+        """
+        Given user & item index tensors, returns their dot-product scores.
+        """
+        users_emb, items_emb = self.computer()
+        u_e = users_emb[users.long()]
+        i_e = items_emb[items.long()]
+        scores = torch.sum(u_e * i_e, dim=1)
+        return scores
