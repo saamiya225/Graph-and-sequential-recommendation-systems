@@ -6,6 +6,8 @@ Xiangnan He et al. LightGCN: Simplifying and Powering Graph Convolution Network 
 
 Design training and test process
 '''
+import os
+import csv
 import world
 import numpy as np
 import torch
@@ -52,8 +54,22 @@ def BPR_train_original(dataset, recommend_model, loss_class, epoch, neg_k=1, w=N
         if world.tensorboard:
             w.add_scalar(f'BPRLoss/BPR', cri, epoch * int(len(users) / world.config['bpr_batch_size']) + batch_i)
     aver_loss = aver_loss / total_batch
+
+    # ——— LOG TRAINING LOSS TO CSV ———
+    save_path = world.config['path']
+    os.makedirs(save_path, exist_ok=True)
+    train_csv = os.path.join(save_path, 'train_epoch_metrics.csv')
+    if not os.path.exists(train_csv):
+        with open(train_csv, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['epoch', 'loss'])
+    with open(train_csv, 'a', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow([epoch, aver_loss])
+
     time_info = timer.dict()
     timer.zero()
+
     return f"loss{aver_loss:.3f}-{time_info}"
     
     
@@ -149,5 +165,23 @@ def Test(dataset, Recmodel, epoch, w=None, multicore=0):
                           {str(world.topks[i]): results['ndcg'][i] for i in range(len(world.topks))}, epoch)
         if multicore == 1:
             pool.close()
+
+
+        # ——— LOG TEST METRICS TO CSV ———
+        save_path = world.config['path']
+        os.makedirs(save_path, exist_ok=True)
+        valid_csv = os.path.join(save_path, 'valid_epoch_metrics.csv')
+        if not os.path.exists(valid_csv):
+            with open(valid_csv, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(['epoch', 'precision', 'recall', 'ndcg'])
+        prec = float(results['precision'][0])
+        rec  = float(results['recall'][0])
+        nd   = float(results['ndcg'][0])
+        with open(valid_csv, 'a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([epoch, prec, rec, nd])
+
+
         print(results)
         return results
