@@ -1,47 +1,60 @@
-'''
+"""
 Created on Mar 1, 2020
 Pytorch Implementation of LightGCN in
 Xiangnan He et al. LightGCN: Simplifying and Powering Graph Convolution Network for Recommendation
 
 @author: Jianbai Ye (gusye@mail.ustc.edu.cn)
-'''
-import argparse
+"""
 
+import argparse
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Go lightGCN")
-    parser.add_argument('--bpr_batch', type=int,default=2048,
-                        help="the batch size for bpr loss training procedure")
-    parser.add_argument('--recdim', type=int,default=64,
-                        help="the embedding size of lightGCN")
-    parser.add_argument('--layer', type=int,default=3,
-                        help="the layer num of lightGCN")
-    parser.add_argument('--lr', type=float,default=0.001,
-                        help="the learning rate")
-    parser.add_argument('--decay', type=float,default=1e-4,
-                        help="the weight decay for l2 normalizaton")
-    parser.add_argument('--dropout', type=int,default=0,
-                        help="using the dropout or not")
-    parser.add_argument('--keepprob', type=float,default=0.6,
-                        help="the batch size for bpr loss training procedure")
-    parser.add_argument('--a_fold', type=int,default=100,
-                        help="the fold num used to split large adj matrix, like gowalla")
-    parser.add_argument('--testbatch', type=int,default=100,
-                        help="the batch size of users for testing")
-    parser.add_argument('--dataset', type=str,default='gowalla',
-                        help="available datasets: [lastfm, gowalla, yelp2018, amazon-book]")
-    parser.add_argument('--path', type=str,default="./checkpoints",
-                        help="path to save weights")
-    parser.add_argument('--topks', nargs='?',default="[20]",
-                        help="@k test list")
-    parser.add_argument('--tensorboard', type=int,default=1,
+    parser.add_argument('--bpr_batch',       type=int,   default=2048,
+                        help="the batch size for BPR loss training")
+    parser.add_argument('--recdim',          type=int,   default=64,
+                        help="the embedding size of LightGCN")
+    parser.add_argument('--layer',           type=int,   default=3,
+                        help="number of GCN layers")
+    parser.add_argument('--lr',              type=float, default=0.001,
+                        help="learning rate")
+    parser.add_argument('--decay',           type=float, default=1e-4,
+                        help="weight decay for L2")
+    parser.add_argument('--dropout',         type=int,   default=0,
+                        help="whether to use adjacency dropout")
+    parser.add_argument('--keepprob',        type=float, default=0.6,
+                        help="keep probability if dropout > 0")
+    parser.add_argument('--a_fold',          type=int,   default=100,
+                        help="fold num to split large adj matrix")
+    parser.add_argument('--testbatch',       type=int,   default=100,
+                        help="user batch size for testing")
+    parser.add_argument('--dataset',         type=str,   default='gowalla',
+                        help="dataset: [lastfm, gowalla, yelp2018, amazon-book]")
+    parser.add_argument('--checkpoint_dir',  type=str,   default='./checkpoints',
+                        help="directory to save weights & logs")
+    parser.add_argument('--topks',           nargs='?', default="[20]",
+                        help="@k list for evaluation")
+    parser.add_argument('--tensorboard',     type=int,   default=1,
                         help="enable tensorboard")
-    parser.add_argument('--comment', type=str,default="lgn")
-    parser.add_argument('--load', type=int,default=0)
-    parser.add_argument('--epochs', type=int,default=1000)
-    parser.add_argument('--multicore', type=int, default=0, help='whether we use multiprocessing or not in test')
-    parser.add_argument('--pretrain', type=int, default=0, help='whether we use pretrained weight or not')
-    parser.add_argument('--seed', type=int, default=2020, help='random seed')
-    parser.add_argument('--model', type=str, default='lgn', help='rec-model, support [mf, lgn]')
-    parser.add_argument( '--exp_smooth_beta', type=float, default=0.5, help='Global exponential‑smoothing β (default 0.5)')
+    parser.add_argument('--comment',         type=str,   default="lgn",
+                        help="run tag/comment")
+    parser.add_argument('--load',            type=int,   default=0,
+                        help="whether to load a pre-saved model")
+    parser.add_argument('--epochs',          type=int,   default=1000,
+                        help="number of training epochs")
+    parser.add_argument('--multicore',       type=int,   default=0,
+                        help="use multiprocessing for test")
+    parser.add_argument('--pretrain',        type=int,   default=0,
+                        help="use pretrained embeddings")
+    parser.add_argument('--seed',            type=int,   default=2020,
+                        help="random seed")
+    parser.add_argument('--model',           type=str,   default='lgn',
+                        help="model: [mf, lgn]")
+    parser.add_argument('--exp_smooth_beta', type=float, default=0.5,
+                        help="global exponential‐smoothing β")
+    parser.add_argument('--use_ppr_weights', action='store_true',
+                        help="if set, load per-node PPR weights for smoothing")
+    parser.add_argument('--ppr_weights_path', type=str,
+                        default='cache/amazon-book_ppr_weights.npy',
+                        help="path to precomputed PPR weights (.npy)")
     return parser.parse_args()
