@@ -77,6 +77,12 @@ class LightGCN(BasicModel):
         self.config = config
         self.dataset = dataset
         self.__init_weight()
+        # load PPR weights if requested
+        if config.get('use_ppr_weights', False):
+            W = np.load(config['ppr_weights_path'])   # [n_nodes, K+1]
+            self.register_buffer('ppr_w', torch.from_numpy(W).float())
+        else:
+            self.ppr_w = None
 
     def __init_weight(self):
         self.num_users  = self.dataset.n_users
@@ -133,13 +139,27 @@ class LightGCN(BasicModel):
         # 3) stack: [n_nodes, K+1, dim]
         embs = torch.stack(embs, dim=1)
 
-        # 4) exponential smoothing weights
-        beta    = self.config.get('exp_smooth_beta', 0.5)
-        K       = self.n_layers
-        weights = [(1 - beta)**k for k in range(K+1)]
-        w       = torch.tensor(weights, dtype=embs.dtype, device=embs.device)
-        w       = w / w.sum()
-        light_out = torch.sum(embs * w.view(1, K+1, 1), dim=1)
+        # 4-a) exponential smoothing weights
+        #beta    = self.config.get('exp_smooth_beta', 0.5)
+        #K       = self.n_layers
+        #weights = [(1 - beta)**k for k in range(K+1)]
+        #w       = torch.tensor(weights, dtype=embs.dtype, device=embs.device)
+        #w       = w / w.sum()
+        #light_out = torch.sum(embs * w.view(1, K+1, 1), dim=1)
+
+        # 4-b) PPR weights
+        # if PPR is loaded, use it:
+        if self.ppr_w is not None:
+            light_out = torch.sum(embs * self.ppr_w.unsqueeze(2), dim=1)
+        else:
+        # fallback to global exponential smoothing
+            beta   = self.config.get('exp_smooth_beta', 0.5)
+            K      = self.n_layers
+            device = embs.device
+            weights = [(1 - beta) ** k for k in range(K + 1)]
+            w       = torch.tensor(weights, dtype=embs.dtype, device=device)
+            w       = w / w.sum()
+            light_out = torch.sum(embs * w.view(1, K + 1, 1), dim=1)
 
         # 5) split back
         users_final, items_final = torch.split(light_out, [self.num_users, self.num_items], dim=0)
