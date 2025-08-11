@@ -26,6 +26,8 @@ def parse_args():
                         help="keep probability if dropout > 0")
     parser.add_argument('--a_fold',          type=int,   default=100,
                         help="fold num to split large adj matrix")
+    parser.add_argument('--A_split', type=bool, default=False,
+                    help="Whether to split adjacency matrix")
     parser.add_argument('--testbatch',       type=int,   default=100,
                         help="user batch size for testing")
     parser.add_argument('--dataset',         type=str,   default='gowalla',
@@ -52,9 +54,8 @@ def parse_args():
                         help="model: [mf, lgn]")
     parser.add_argument('--exp_smooth_beta', type=float, default=0.5,
                         help="global exponential‐smoothing β")
-    parser.add_argument('--use_ppr_weights', action='store_true',
-                        help="if set, load per-node PPR weights for smoothing")
-    parser.add_argument('--ppr_weights_path', type=str,
-                        default='cache/amazon-book_ppr_weights.npy',
-                        help="path to precomputed PPR weights (.npy)")
+    
+    parser.add_argument('--use_ppr_weights', action='store_true', help='Use PPR weighting for layer combination')
+    parser.add_argument('--ppr_weights_path', type=str, default=None, help='Path to PPR weights file (used if --use_ppr_weights is set)')
+
     return parser.parse_args()

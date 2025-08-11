@@ -1,8 +1,3 @@
-"""
-Created on Mar 1, 2020
-PyTorch Implementation of LightGCN + MLP-gating
-Xiangnan He et al. LightGCN: Simplifying and Powering Graph Convolution Network for Recommendation
-"""
 import world
 import torch
 from dataloader import BasicDataset
@@ -74,7 +69,6 @@ class LightGCN(BasicModel):
         self.__init_weight()
 
     def __init_weight(self):
-        # core hyper-params
         self.num_users  = self.dataset.n_users
         self.num_items  = self.dataset.m_items
         self.latent_dim = self.config['latent_dim_rec']
@@ -82,7 +76,6 @@ class LightGCN(BasicModel):
         self.keep_prob  = self.config['keep_prob']
         self.A_split    = self.config['A_split']
 
-        # embeddings
         self.embedding_user = nn.Embedding(self.num_users, self.latent_dim)
         self.embedding_item = nn.Embedding(self.num_items, self.latent_dim)
         if self.config.get('pretrain', 0) == 0:
@@ -92,10 +85,11 @@ class LightGCN(BasicModel):
             self.embedding_user.weight.data.copy_(torch.from_numpy(self.config['user_emb']))
             self.embedding_item.weight.data.copy_(torch.from_numpy(self.config['item_emb']))
 
-        # MLP gate: single scalar → K+1 hop weights
-        self.layer_gate = nn.Linear(1, self.n_layers + 1)
+        # Robust MLP gate expects 2 features (norm, mean) → (K+1) hops
+        self.layer_gate = nn.Linear(2, self.n_layers + 1)
+        nn.init.xavier_uniform_(self.layer_gate.weight)
+        nn.init.zeros_(self.layer_gate.bias)
 
-        # load & move sparse adjacency matrix to device
         self.Graph = self.dataset.getSparseGraph()
         if isinstance(self.Graph, torch.Tensor):
             self.Graph = self.Graph.coalesce().to(self.device)
@@ -119,13 +113,11 @@ class LightGCN(BasicModel):
         return self.__dropout_x(self.Graph, keep_prob)
 
     def computer(self):
-        # 1) initial embeddings
         users_emb = self.embedding_user.weight                # [n_users, d]
         items_emb = self.embedding_item.weight                # [n_items, d]
         all_emb   = torch.cat([users_emb, items_emb], dim=0) # [n_nodes, d]
         embs      = [all_emb]
 
-        # 2) propagate through K layers
         g = self.__dropout(self.keep_prob) if (self.config['dropout'] and self.training) else self.Graph
         for _ in range(self.n_layers):
             if self.A_split:
@@ -135,19 +127,23 @@ class LightGCN(BasicModel):
                 all_emb = torch.sparse.mm(g, all_emb)
             embs.append(all_emb)
 
-        # 3) stack hop embeddings: [n_nodes, K+1, d]
-        embs = torch.stack(embs, dim=1)
+        embs = torch.stack(embs, dim=1)  # [n_nodes, K+1, d]
 
-        # 4) compute per-node gate from 0-hop norm
-        raw   = embs[:, 0]                  # [n_nodes, d]
-        feat  = raw.norm(dim=1, keepdim=True)# [n_nodes, 1]
-        logits= self.layer_gate(feat)       # [n_nodes, K+1]
-        alpha = torch.softmax(logits, dim=1)# [n_nodes, K+1]
+        # More expressive features for gating
+        raw   = embs[:, 0]                                    # [n_nodes, d]
+        feat_norm = raw.norm(dim=1, keepdim=True)             # [n_nodes, 1]
+        feat_mean = raw.mean(dim=1, keepdim=True)             # [n_nodes, 1]
+        feat = torch.cat([feat_norm, feat_mean], dim=1)       # [n_nodes, 2]
 
-        # 5) weighted sum across hops
+        logits = self.layer_gate(feat)                        # [n_nodes, K+1]
+        alpha = torch.softmax(logits, dim=1)                  # [n_nodes, K+1]
+
+        # Uncomment the print below to debug gate values (rarely prints)
+        # if self.training and torch.rand(1).item() < 0.01:
+        #     print('alpha min:', alpha.min().item(), 'max:', alpha.max().item(), 'mean:', alpha.mean().item())
+
         light_out = torch.sum(embs * alpha.unsqueeze(2), dim=1)  # [n_nodes, d]
 
-        # 6) split back to users & items
         users_final, items_final = torch.split(
             light_out,
             [self.num_users, self.num_items],

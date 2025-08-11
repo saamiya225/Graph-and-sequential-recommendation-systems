@@ -267,15 +267,13 @@ def AUC(all_item_scores, dataset, test_data):
     test_item_scores = all_item_scores[all_item_scores >= 0]
     return roc_auc_score(r, test_item_scores)
 
-def getLabel(test_data, pred_data):
-    r = []
-    for i in range(len(test_data)):
-        groundTrue = test_data[i]
-        predictTopK = pred_data[i]
-        pred = list(map(lambda x: x in groundTrue, predictTopK))
-        pred = np.array(pred).astype("float")
-        r.append(pred)
-    return np.array(r).astype('float')
+def getLabel(groundTruth, predictTopK):
+    # --- Robust fix: always treat groundTruth as list ---
+    if not isinstance(groundTruth, (list, set, tuple, np.ndarray)):
+        groundTruth = [groundTruth]
+    pred = list(map(lambda x: x in groundTruth, predictTopK))
+    return np.array(pred, dtype=np.float32)
+
 
 # ====================end Metrics=============================
 # =========================================================

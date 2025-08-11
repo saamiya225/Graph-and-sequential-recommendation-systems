@@ -1,8 +1,3 @@
-'''
-Created on Mar 1, 2020
-Design training and test process for LightGCN
-'''
-
 import os
 import csv
 import world
@@ -60,20 +55,27 @@ def BPR_train_original(dataset, recommend_model, loss_class, epoch, neg_k=1, w=N
     timer.zero()
     return f"loss{aver_loss:.3f}-{time_info}"
 
-
 def test_one_batch(X):
-    sorted_items = X[0].numpy()
+    sorted_items = X[0].cpu().numpy()
     groundTrue  = X[1]
+    if not isinstance(groundTrue, (list, set, tuple, np.ndarray)):
+        groundTrue = [groundTrue]
+    # Now always batch-of-one
+    test_data = [groundTrue]
     r = utils.getLabel(groundTrue, sorted_items)
+    r = np.expand_dims(r, axis=0)  # [1, topk]
+
     pre, recall, ndcg = [], [], []
     for k in world.topks:
-        ret = utils.RecallPrecision_ATk(groundTrue, r, k)
+        ret = utils.RecallPrecision_ATk(test_data, r, k)
         pre.append(ret['precision'])
         recall.append(ret['recall'])
-        ndcg.append(utils.NDCGatK_r(groundTrue, r, k))
+        ndcg.append(utils.NDCGatK_r(test_data, r, k))
     return {'precision': np.array(pre),
             'recall':    np.array(recall),
             'ndcg':      np.array(ndcg)}
+
+
 
 
 def Test(dataset, Recmodel, epoch, w=None, multicore=0):
@@ -92,9 +94,12 @@ def Test(dataset, Recmodel, epoch, w=None, multicore=0):
     with torch.no_grad():
         users = list(testDict.keys())
         total_batch = len(users) // u_batch_size + 1
+        batch_result = []
         for batch_users in utils.minibatch(users, batch_size=u_batch_size):
             allPos     = dataset.getUserPosItems(batch_users)
             groundTrue = [testDict[u] for u in batch_users]
+            # Ensure every groundTruth is a list (or set/tuple), even if only one item
+            groundTrue = [gt if isinstance(gt, (list, set, tuple)) else [gt] for gt in groundTrue]
             batch_gpu  = torch.Tensor(batch_users).long().to(world.device)
 
             rating_K = Recmodel.getUsersRating(batch_gpu)
@@ -106,14 +111,14 @@ def Test(dataset, Recmodel, epoch, w=None, multicore=0):
             rating_K[exclude_idx, exclude_items] = -(1 << 10)
 
             _, topk = torch.topk(rating_K, k=max_K)
-            if multicore == 1:
-                # prepare for pool
-                pass
-            # collect for single-core
-            # … we build X and call test_one_batch …
+            # Loop over each user in the batch
+            for i, u in enumerate(batch_users):
+                X = (topk[i], groundTrue[i])
+                batch_result.append(test_one_batch(X))
 
-        # aggregate metrics
-        # … fill results['precision'], etc. …
+        # Aggregate results for each metric
+        for metric in results.keys():
+            results[metric] = np.mean([r[metric] for r in batch_result], axis=0)
 
     # ——— LOG VALIDATION METRICS TO CSV ———
     save_path = world.config.get(
