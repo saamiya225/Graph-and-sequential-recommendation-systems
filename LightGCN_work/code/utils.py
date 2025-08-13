@@ -13,7 +13,7 @@ from torch import log
 from dataloader import BasicDataset
 from time import time
 from model import LightGCN
-from model import PairWiseModel
+#from model import PairWiseModel
 from sklearn.metrics import roc_auc_score
 import random
 import os
@@ -31,7 +31,7 @@ except:
 
 class BPRLoss:
     def __init__(self,
-                 recmodel : PairWiseModel,
+                 recmodel : nn.Module,
                  config : dict):
         self.model = recmodel
         self.weight_decay = config['decay']

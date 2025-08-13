@@ -79,22 +79,23 @@ def test_one_batch(X):
 
 
 def Test(dataset, Recmodel, epoch, w=None, multicore=0):
+    import multiprocessing, sys
+    from world import CORES
     u_batch_size = world.config['test_u_batch_size']
     testDict     = dataset.testDict
     Recmodel     = Recmodel.eval()
     max_K        = max(world.topks)
-    if hasattr(Recmodel, "invalidate_cache"):
-        Recmodel.invalidate_cache()
-        
+
     pool = None
-    
     if multicore == 1:
-        # use world.CORES if your world.py defines it; else fall back to half CPUs
         try:
-            CORES = world.CORES
-        except AttributeError:
-            CORES = multiprocessing.cpu_count() // 2 or 1
-        pool = multiprocessing.Pool(CORES)
+            # Prefer 'fork' on macOS to avoid spawn recursion
+            ctx = multiprocessing.get_context('fork') if sys.platform == 'darwin' else multiprocessing
+            pool = ctx.Pool(CORES)
+        except Exception as e:
+            print(f"[WARN] Multiprocessing disabled for eval due to: {e}")
+            pool = None
+            multicore = 0
 
     results = {'precision': np.zeros(len(world.topks)),
                'recall':    np.zeros(len(world.topks)),

@@ -1,0 +1,1 @@
+epoch,time_sec,lr,precision@20,recall@20,ndcg@20
