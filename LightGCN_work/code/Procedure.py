@@ -83,13 +83,23 @@ def Test(dataset, Recmodel, epoch, w=None, multicore=0):
     testDict     = dataset.testDict
     Recmodel     = Recmodel.eval()
     max_K        = max(world.topks)
-
+    if hasattr(Recmodel, "invalidate_cache"):
+        Recmodel.invalidate_cache()
+        
+    pool = None
+    
     if multicore == 1:
+        # use world.CORES if your world.py defines it; else fall back to half CPUs
+        try:
+            CORES = world.CORES
+        except AttributeError:
+            CORES = multiprocessing.cpu_count() // 2 or 1
         pool = multiprocessing.Pool(CORES)
 
     results = {'precision': np.zeros(len(world.topks)),
                'recall':    np.zeros(len(world.topks)),
                'ndcg':      np.zeros(len(world.topks))}
+
 
     with torch.no_grad():
         users = list(testDict.keys())
