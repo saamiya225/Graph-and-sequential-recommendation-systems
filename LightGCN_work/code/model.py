@@ -1,232 +1,305 @@
+import os
+import numpy as np
+from typing import Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
+
 import world
-from dataloader import BasicDataset
 
-class BasicModel(nn.Module):
-    def __init__(self): super().__init__()
+############################
+# Helpers
+############################
 
-class LightGCN(BasicModel):
+def _scipy_csr_to_torch_csr(sp_csr, device, dtype=torch.float32):
+    indptr  = torch.from_numpy(sp_csr.indptr.astype(np.int64))
+    indices = torch.from_numpy(sp_csr.indices.astype(np.int64))
+    data    = torch.from_numpy(sp_csr.data).to(dtype)
+    return torch.sparse_csr_tensor(indptr, indices, data, size=sp_csr.shape, device=device)
+
+def _normalize_layer_weights(n_layers: int, beta: float = 0.0):
     """
-    LightGCN backbone + Global bias + MLP scorer (+ optional popularity gate).
-    - Training: fresh graph every backward (no train-cache)
-    - Eval: optional embedding cache; use invalidate_cache() before testing each epoch
+    Return per-layer weights for combining LightGCN layer outputs.
+    If beta > 0: exponential smoothing weight ~ beta^l (l=0..L).
+    Otherwise uniform.
+    """
+    if beta > 0:
+        weights = np.array([beta ** l for l in range(n_layers + 1)], dtype=np.float64)
+        weights = weights / (weights.sum() + 1e-12)
+        return torch.tensor(weights, dtype=torch.float32)
+    else:
+        return torch.ones(n_layers + 1, dtype=torch.float32) / float(n_layers + 1)
+
+############################
+# LightGCN + Two-Tower MLP
+############################
+
+class LightGCN(nn.Module):
+    """
+    LightGCN backbone with:
+      - Two-tower MLP scoring: score(u,i) = < f_u(e_u), f_i(e_i^fused) > + b_u + b_i
+      - Popularity-gated item fusion: e_i^g = (1 - z_i)*e_i + z_i*p_i
+      - Optional Item–Item graph fusion (Instacart): e_i^final = e_i^g + alpha * (A_i2i @ e_i)
     """
     def __init__(self, config, dataset):
         super().__init__()
         self.config  = config
         self.dataset = dataset
-        self.device  = world.device
 
-        self.latent_dim = int(config.get('latent_dim_rec', 128))
-        self.n_layers   = int(config.get('lightGCN_n_layers', 4))
+        self.n_users = dataset.n_users
+        self.n_items = dataset.m_items
 
-        # Embeddings
-        self.num_users = dataset.n_users
-        self.num_items = dataset.m_items
-        self.embedding_user = nn.Embedding(self.num_users, self.latent_dim)
-        self.embedding_item = nn.Embedding(self.num_items, self.latent_dim)
-        nn.init.normal_(self.embedding_user.weight, std=0.1)
-        nn.init.normal_(self.embedding_item.weight, std=0.1)
+        self.latent_dim  = int(config['latent_dim_rec'])
+        self.n_layers    = int(config['lightGCN_n_layers'])
+        self.keep_prob   = float(config['keep_prob']) if int(config['dropout']) else 1.0
+        self.A_split     = bool(config['A_split'])
+        self.exp_beta    = float(config.get('exp_smooth_beta', 0.0))
 
-        # Bias embeddings
-        self.user_bias = nn.Embedding(self.num_users, self.latent_dim)
-        self.item_bias = nn.Embedding(self.num_items, self.latent_dim)
+        # embeddings
+        self.user_emb = nn.Embedding(self.n_users, self.latent_dim)
+        self.item_emb = nn.Embedding(self.n_items, self.latent_dim)
+        nn.init.normal_(self.user_emb.weight, std=0.01)
+        nn.init.normal_(self.item_emb.weight, std=0.01)
+
+        # biases
+        self.bias_scale = float(config.get('bias_scale', 1.0))
+        self.user_bias = nn.Embedding(self.n_users, 1)
+        self.item_bias = nn.Embedding(self.n_items, 1)
         nn.init.zeros_(self.user_bias.weight)
         nn.init.zeros_(self.item_bias.weight)
-        self.bias_scale = float(config.get('bias_scale', 0.5))
 
-        # Graph
-        self.Graph = dataset.getSparseGraph().to(self.device)
-
-        # Global + MLP scorer
-        in_dim = self.latent_dim * 5  # u, i, u_bias, i_bias, global
-        self.pre_norm = nn.LayerNorm(in_dim)
-        self.mlp = nn.Sequential(
-            nn.Dropout(0.2),
-            nn.Linear(in_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, 1)
+        # two-tower MLPs
+        # user tower: R^d -> R^d
+        self.user_tower = nn.Sequential(
+            nn.Linear(self.latent_dim, self.latent_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(self.latent_dim, self.latent_dim)
+        )
+        # item tower: R^d -> R^d (applied after fusion)
+        self.item_tower = nn.Sequential(
+            nn.Linear(self.latent_dim, self.latent_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(self.latent_dim, self.latent_dim)
         )
 
-        # Residual dot-product blend (anchor CF)
-        self.residual_alpha = float(config.get('residual_alpha', 0.3))
-        self.use_norm = bool(config.get('use_norm', False))
-
-        # Popularity-Gated Fusion (off unless enabled)
+        # popularity-gated fusion
         self.use_pop_gate = bool(config.get('use_pop_gate', False))
-        self.pop_bins     = int(config.get('pop_bins', 5))
-        if self.use_pop_gate:
-            counts = self._compute_item_popularity()
-            bins, _ = self._bin_popularity(counts, self.pop_bins)
-            self.register_buffer('item_pop_bin', torch.from_numpy(bins).long().to(self.device))
-            self.pop_emb = nn.Embedding(self.pop_bins, self.latent_dim)
-            self.gate_i = nn.Linear(self.latent_dim, self.latent_dim, bias=True)
-            self.gate_p = nn.Linear(self.latent_dim, self.latent_dim, bias=False)
+        self.pop_bins     = int(config.get('pop_bins', 10))
+        self.pop_emb      = nn.Embedding(self.pop_bins, self.latent_dim)
+        nn.init.normal_(self.pop_emb.weight, std=0.01)
+        self.gate_mlp     = nn.Sequential(
+            nn.Linear(2 * self.latent_dim, self.latent_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(self.latent_dim, 1)
+        )
 
-        # Eval-time cache (optional)
-        self._cached_users = None
-        self._cached_items = None
+        # i2i message passing (Instacart only)
+        self.i2i_adj = None
+        self.residual_alpha = float(config.get('residual_alpha', 0.2))
+        if world.dataset == 'instacart':
+            i2i_path = config.get('i2i_path', None)
+            if i2i_path is None:
+                i2i_path = os.path.join(world.DATA_PATH, 'instacart', 'i2i_adj.npz')
+            if os.path.exists(i2i_path):
+                from scipy.sparse import load_npz
+                sp_i2i = load_npz(i2i_path)
+                self.i2i_adj = _scipy_csr_to_torch_csr(sp_i2i, device=world.device, dtype=torch.float32)
+                world.cprint(f"[I2I] Loaded item-item CSR from {i2i_path}. nnz={sp_i2i.nnz}")
+            else:
+                world.cprint(f"[I2I] WARNING: not found at {i2i_path}. Continuing without i2i.")
 
-    # ---------- Graph propagation ----------
-    def computer(self):
-        users_emb = self.embedding_user.weight
-        items_emb = self.embedding_item.weight
-        all_emb   = torch.cat([users_emb, items_emb], dim=0)
+        # precompute pop-bins from training degree
+        self._build_item_pop_bins()
+
+        # layer weights for LightGCN combination
+        self.register_buffer('layer_weights', _normalize_layer_weights(self.n_layers, beta=self.exp_beta))
+
+        # adjacency from dataset
+        self.Graph = self.dataset.getSparseGraph()  # torch sparse (coalesced) OR list of folds
+
+        # NOTE: We intentionally do not cache per-epoch embeddings to ensure fresh graph each backward.
+        # (As requested).
+
+    def _build_item_pop_bins(self):
+        """
+        Compute item popularity bins from training counts or item degree.
+        Registers: self.item_pop_bins (LongTensor, [n_items])
+        """
+        try:
+            item_freq = getattr(self.dataset, 'items_D', None)
+        except Exception:
+            item_freq = None
+        if item_freq is None:
+            # fallback: count from trainItem if available
+            if hasattr(self.dataset, 'trainItem'):
+                freq = np.zeros(self.n_items, dtype=np.int64)
+                for it in self.dataset.trainItem:
+                    if it < self.n_items:
+                        freq[int(it)] += 1
+                item_freq = freq
+            else:
+                item_freq = np.ones(self.n_items, dtype=np.int64)
+
+        ranks = np.argsort(np.argsort(item_freq))
+        denom = max(1, len(item_freq) - 1)
+        quant = ranks.astype(np.float64) / float(denom)  # in [0,1]
+        bin_ids = np.floor(quant * self.pop_bins).astype(np.int64)
+        bin_ids[bin_ids == self.pop_bins] = self.pop_bins - 1
+
+        self.register_buffer('item_pop_bins', torch.from_numpy(bin_ids))
+
+    def getUsersRating(self, users: torch.Tensor) -> torch.Tensor:
+        """
+        users: LongTensor [B]
+        return: scores for all items: [B, n_items]
+        """
+        self.train(False)
+        # fresh embeddings from graph
+        all_users, all_items = self.computer()
+        # fuse item tower
+        all_items_fused = self._fuse_item_tower(all_items)
+
+        # towers
+        U = self.user_tower(all_users[users])          # [B, d]
+        I = self.item_tower(all_items_fused)           # [N, d]
+
+        # scores = U @ I^T + biases
+        scores = torch.matmul(U, I.transpose(0,1))     # [B, N]
+        # add bias
+        u_b = self.user_bias(users).view(-1, 1) * self.bias_scale
+        i_b = self.item_bias.weight.view(1, -1) * self.bias_scale
+        scores = scores + u_b + i_b
+        return scores
+
+    def computer(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        LightGCN propagation: sum layer outputs with weights.
+        Returns: final user, item embeddings after combination.
+        """
+        users_emb = self.user_emb.weight
+        items_emb = self.item_emb.weight
+        all_emb = torch.cat([users_emb, items_emb], dim=0)
+
         embs = [all_emb]
         g = self.Graph
-        for _ in range(self.n_layers):
-            all_emb = torch.sparse.mm(g, all_emb)
-            embs.append(all_emb)
-        all_emb = torch.mean(torch.stack(embs, dim=1), dim=1)
-        users_final, items_final = torch.split(all_emb, [self.num_users, self.num_items], dim=0)
-        return users_final, items_final
-
-    # ---------- Popularity utils ----------
-    def _compute_item_popularity(self) -> np.ndarray:
-        if hasattr(self.dataset, "UserItemNet"):
-            try:
-                return np.asarray(self.dataset.UserItemNet.sum(axis=0)).ravel().astype(np.int64)
-            except Exception:
-                pass
-        if hasattr(self.dataset, "trainUser"):
-            counts = np.zeros(self.num_items, dtype=np.int64)
-            for items in self.dataset.trainUser:
-                for i in items: counts[int(i)] += 1
-            return counts
-        if hasattr(self.dataset, "allPos"):
-            counts = np.zeros(self.num_items, dtype=np.int64)
-            for u in range(self.num_users):
-                for i in self.dataset.allPos(u): counts[int(i)] += 1
-            return counts
-        return np.ones(self.num_items, dtype=np.int64)
-
-    @staticmethod
-    def _bin_popularity(counts: np.ndarray, n_bins: int):
-        logc = np.log1p(counts.astype(np.float64))
-        edges = np.quantile(logc, np.linspace(0., 1., n_bins + 1))
-        edges[0] -= 1e-8; edges[-1] += 1e-8
-        bins = np.digitize(logc, edges[1:-1], right=False).astype(np.int64)
-        return bins, edges
-
-    def _fuse_item_with_pop(self, i_gcn: torch.Tensor, item_ids: torch.Tensor) -> torch.Tensor:
-        bins = self.item_pop_bin[item_ids]
-        p    = self.pop_emb(bins)
-        gate = torch.sigmoid(self.gate_i(i_gcn) + self.gate_p(p))
-        return gate * i_gcn + (1.0 - gate) * p
-
-    # ---------- Global context ----------
-    def _global_context(self, users_emb, items_emb):
-        return users_emb.mean(dim=0) + items_emb.mean(dim=0)
-
-    # ---------- Scoring ----------
-    def _score_with_mlp(self, u_vec, i_vec, users, items, users_emb, items_emb):
-        if self.use_norm:
-            u_vec = F.normalize(u_vec, dim=-1)
-            i_vec = F.normalize(i_vec, dim=-1)
-        u_b = self.bias_scale * self.user_bias(users.long())
-        i_b = self.bias_scale * self.item_bias(items.long())
-        g   = self._global_context(users_emb, items_emb).unsqueeze(0).expand(u_vec.size(0), -1)
-        x   = torch.cat([u_vec, i_vec, u_b, i_b, g], dim=1)
-        x   = self.pre_norm(x)
-        mlp_score = self.mlp(x).squeeze(-1)
-        if self.residual_alpha > 0.0:
-            dot = torch.sum(u_vec * i_vec, dim=-1)
-            return self.residual_alpha * dot + (1.0 - self.residual_alpha) * mlp_score
-        return mlp_score
-
-    # ---------- Forward ----------
-    def forward(self, users: torch.Tensor, items: torch.Tensor) -> torch.Tensor:
-        if self.training:
-            users_emb, items_emb = self.computer()  # fresh graph
+        if isinstance(g, list):
+            # split graph
+            for _ in range(self.n_layers):
+                temp_emb = []
+                for G in g:
+                    side_emb = torch.sparse.mm(G, embs[-1])
+                    temp_emb.append(side_emb)
+                embs.append(torch.cat(temp_emb, dim=0))
         else:
-            if self._cached_users is None:
-                self._cached_users, self._cached_items = self.computer()
-            users_emb, items_emb = self._cached_users, self._cached_items
+            # single graph
+            for _ in range(self.n_layers):
+                all_emb = torch.sparse.mm(g, embs[-1])
+                embs.append(all_emb)
 
-        u = users_emb[users.long()]
-        i = items_emb[items.long()]
-        if self.use_pop_gate:
-            i = self._fuse_item_with_pop(i, items.long())
-        return self._score_with_mlp(u, i, users, items, users_emb, items_emb)
+        # weighted sum of layers
+        layer_ws = self.layer_weights.to(embs[0].device)  # [L+1]
+        # stack: [(n, d)] -> (L+1, n, d)
+        stack = torch.stack(embs, dim=0)
+        # weighted sum across 0th dim
+        out = (layer_ws.view(-1, 1, 1) * stack).sum(dim=0)
 
-    # ---------- Full scoring for evaluation ----------
-    def getUsersRating(self, users: torch.Tensor) -> torch.Tensor:
-        if self.training:
-            users_emb, items_emb = self.computer()  # fresh
-        else:
-            if self._cached_users is None:
-                self._cached_users, self._cached_items = self.computer()
-            users_emb, items_emb = self._cached_users, self._cached_items
+        # split back
+        users, items = torch.split(out, [self.n_users, self.n_items])
+        return users, items
 
-        u_gcn = users_emb[users.long()]  # [B, D]
-        I = items_emb                    # [N, D]
-        if self.use_pop_gate:
-            all_item_ids = torch.arange(self.num_items, device=self.device, dtype=torch.long)
-            I = self._fuse_item_with_pop(I, all_item_ids)
-        if self.use_norm:
-            u_gcn = F.normalize(u_gcn, dim=-1)
-            I     = F.normalize(I, dim=-1)
+    def _i2i_message(self, E_item: torch.Tensor) -> torch.Tensor:
+        """
+        Item–Item message passing (Instacart).
+        E_item: [n_items, d] -> return same shape
+        """
+        if self.i2i_adj is None:
+            return torch.zeros_like(E_item)
+        return torch.spmm(self.i2i_adj, E_item)  # CSR @ dense
 
-        # Chunked MLP scoring
-        B, N, D = u_gcn.size(0), I.size(0), I.size(1)
-        chunk = 8192
-        out = []
-        for s in range(0, N, chunk):
-            e = min(N, s + chunk)
-            i_chunk = I[s:e]
-            u_e = u_gcn.unsqueeze(1).expand(B, e - s, D)
-            i_e = i_chunk.unsqueeze(0).expand(B, e - s, D)
-            u_b = self.bias_scale * self.user_bias(users.long()).unsqueeze(1).expand_as(u_e)
-            i_b = self.bias_scale * self.item_bias(torch.arange(s, e, device=self.device)).unsqueeze(0).expand_as(i_e)
-            g   = self._global_context(users_emb, items_emb).unsqueeze(0).unsqueeze(0).expand(B, e - s, D)
-            X   = torch.cat([u_e, i_e, u_b, i_b, g], dim=2)
-            X   = self.pre_norm(X)
-            scores = self.mlp(X).squeeze(-1)
-            if self.residual_alpha > 0.0:
-                dot = (u_e * i_e).sum(dim=-1)
-                scores = self.residual_alpha * dot + (1.0 - self.residual_alpha) * scores
-            out.append(scores)
-        return torch.cat(out, dim=1)
+    def _pop_gate_item(self, E_item: torch.Tensor) -> torch.Tensor:
+        """
+        Popularity-gated fusion:
+          p_i = pop_emb[bin(i)]
+          z_i = sigmoid(MLP([E_i || p_i]))
+          E_i^g = (1-z_i)*E_i + z_i*p_i
+        """
+        if not self.use_pop_gate:
+            return E_item
+        pop_ids = self.item_pop_bins.to(E_item.device)
+        p_vec   = self.pop_emb(pop_ids)           # [n_items, d]
+        gate_in = torch.cat([E_item, p_vec], dim=-1)
+        z       = torch.sigmoid(self.gate_mlp(gate_in))  # [n_items, 1]
+        return (1.0 - z) * E_item + z * p_vec
 
-    # ---------- BPR loss ----------
-    def bpr_loss(self, users: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):
-        users_emb, items_emb = self.computer()  # ALWAYS fresh each backward
-        u  = users_emb[users.long()]
-        ip = items_emb[pos.long()]
-        ineg = items_emb[neg.long()]
-        if self.use_pop_gate:
-            ip   = self._fuse_item_with_pop(ip,  pos.long())
-            ineg = self._fuse_item_with_pop(ineg, neg.long())
-        if self.use_norm:
-            u   = F.normalize(u, dim=-1)
-            ip  = F.normalize(ip, dim=-1)
-            ineg= F.normalize(ineg, dim=-1)
+    def _fuse_item_tower(self, E_item: torch.Tensor) -> torch.Tensor:
+        """
+        Apply pop-gate, then optional i2i residual: E_i^final = E_i^g + alpha * (A_i2i @ E_i)
+        """
+        Ei = self._pop_gate_item(E_item)
+        if self.i2i_adj is not None:
+            Ii = self._i2i_message(E_item)
+            Ei = Ei + self.residual_alpha * Ii
+        return Ei
 
-        up = self._score_with_mlp(u, ip, users, pos, users_emb, items_emb)
-        un = self._score_with_mlp(u, ineg, users, neg, users_emb, items_emb)
+    def bpr_loss(self, users, pos, neg):
+        """
+        Standard BPR loss with two-tower scoring.
+        users, pos, neg: LongTensors of same length
+        """
+        self.train(True)
+        # fresh embeddings
+        all_users, all_items = self.computer()
+        all_items_fused = self._fuse_item_tower(all_items)
 
-        loss = torch.mean(F.softplus(un - up))
-        reg  = (u.norm(2).pow(2) + ip.norm(2).pow(2) + ineg.norm(2).pow(2)) / (2.0 * len(users))
+        u_e = all_users[users]           # [B, d]
+        p_e = all_items_fused[pos]       # [B, d]
+        n_e = all_items_fused[neg]       # [B, d]
+
+        u_b = self.user_bias(users) * self.bias_scale  # [B, 1]
+        p_b = self.item_bias(pos)   * self.bias_scale  # [B, 1]
+        n_b = self.item_bias(neg)   * self.bias_scale  # [B, 1]
+
+        u_z = self.user_tower(u_e)   # [B, d]
+        p_z = self.item_tower(p_e)   # [B, d]
+        n_z = self.item_tower(n_e)   # [B, d]
+
+        pos_scores = (u_z * p_z).sum(dim=-1, keepdim=True) + u_b + p_b  # [B,1]
+        neg_scores = (u_z * n_z).sum(dim=-1, keepdim=True) + u_b + n_b  # [B,1]
+
+        loss = -F.logsigmoid(pos_scores - neg_scores).mean()
+
+        # L2 regularization on base embeddings
+        reg = (u_e.norm(2).pow(2) + p_e.norm(2).pow(2) + n_e.norm(2).pow(2)) / users.shape[0]
         return loss, reg
 
-    # ---------- Cache control ----------
-    def invalidate_cache(self):
-        self._cached_users = None
-        self._cached_items = None
+    def forward(self, users, items=None):
+        """
+        If items is None: return scores over all items for given users.
+        Else return pairwise scores for the given (users, items).
+        """
+        if items is None:
+            return self.getUsersRating(users)
+
+        # else: pairwise scores
+        all_users, all_items = self.computer()
+        all_items_fused = self._fuse_item_tower(all_items)
+
+        u_e = all_users[users]             # [B, d]
+        i_e = all_items_fused[items]       # [B, d]
+
+        u_z = self.user_tower(u_e)         # [B, d]
+        i_z = self.item_tower(i_e)         # [B, d]
+
+        u_b = self.user_bias(users) * self.bias_scale  # [B, 1]
+        i_b = self.item_bias(items) * self.bias_scale  # [B, 1]
+
+        scores = (u_z * i_z).sum(dim=-1, keepdim=True) + u_b + i_b
+        return scores.squeeze(-1)
 
     @torch.no_grad()
-    def print_pop_gate_stats(self, sample_items=4096):
-        if not self.use_pop_gate:
-            print("[pop-gate] disabled"); return
-        idx = torch.randint(0, self.num_items, (sample_items,), device=self.device)
-        i = self.embedding_item.weight[idx]
-        p = self.pop_emb(self.item_pop_bin[idx])
-        gate = torch.sigmoid(self.gate_i(i) + self.gate_p(p))
-        print(f"[pop-gate] mean={gate.mean().item():.3f}, std={gate.std().item():.3f}")
-        for b in range(self.pop_bins):
-            m = (self.item_pop_bin[idx] == b)
-            if m.any():
-                print(f"  bin {b}: mean={gate[m].mean().item():.3f}, n={int(m.sum())}")
+    def invalidate_cache(self):
+        """
+        Kept for API compatibility; we do not cache per-epoch tensors.
+        """
+        return

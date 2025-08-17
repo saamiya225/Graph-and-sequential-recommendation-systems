@@ -1,96 +1,102 @@
-# world.py — central config + globals expected across the repo
-
-import os, sys, ast, multiprocessing
+import os
+import ast
+import torch
+import multiprocessing
 from os.path import dirname, join
 from parse import parse_args
 
-# Workaround for MKL/KMP clashes (esp. on Mac)
+# workaround for Mac/KMP issue (if needed)
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 
-# -------- parse CLI --------
 args = parse_args()
 
-# -------- simple print wrapper (some files import this) --------
-def cprint(*a, **k):
-    print(*a, **k)
+def cprint(*args_, **kwargs):
+    print(*args_, **kwargs)
 
-# -------- project paths --------
+# Basic globals
+seed        = args.seed
+dataset     = args.dataset
+comment     = args.comment
+tensorboard = args.tensorboard
+LOAD        = args.load
+model_name  = args.model
+TRAIN_epochs= args.epochs
+topks       = ast.literal_eval(args.topks) if isinstance(args.topks, str) else args.topks
+
+# CORES
+try:
+    CORES = multiprocessing.cpu_count() // 2
+except:
+    CORES = 4
+
+# Paths
 ROOT_PATH  = dirname(dirname(__file__))
 CODE_PATH  = join(ROOT_PATH, 'code')
 DATA_PATH  = join(ROOT_PATH, 'data')
 BOARD_PATH = join(CODE_PATH, 'runs')
+PATH       = args.checkpoint_dir
 
-# prefer --checkpoint_dir; keep original behavior naming as FILE_PATH
-FILE_PATH  = args.checkpoint_dir
-os.makedirs(FILE_PATH, exist_ok=True)
-
-# allow other modules to import sources if needed
-sys.path.append(join(CODE_PATH, 'sources'))
-
-# -------- expose frequently used args as module-level variables --------
-dataset       = args.dataset
-model_name    = args.model
-tensorboard   = args.tensorboard
-LOAD          = args.load
-TRAIN_epochs  = args.epochs
-seed          = args.seed
-comment       = args.comment
-PATH       = FILE_PATH  
-
-# tops-K list
-try:
-    topks = ast.literal_eval(args.topks)
-except Exception:
-    topks = [20]
-
-# number of CPU cores some code prints/uses
-CORES = max(1, multiprocessing.cpu_count() // 2)
-
-# -------- build config dict (what models/dataloader expect) --------
-# A_split can come either from explicit --A_split or legacy behaviour (bool(a_fold))
-A_split_flag = getattr(args, 'A_split', None)
-if A_split_flag is None:
-    A_split_flag = bool(args.a_fold)
-
+# config dict
 config = {
-    'checkpoint_dir':    FILE_PATH,
-    'dataset':           args.dataset,
-    'lr':                args.lr,
-    'decay':             args.decay,
-    'lightGCN_n_layers': args.layer,
-    'latent_dim_rec':    args.recdim,
-    'bpr_batch_size':    args.bpr_batch,
-    'test_u_batch_size': args.testbatch,
-    'dropout':           args.dropout,
-    'keep_prob':         args.keepprob,
-    'A_split':           A_split_flag,
-    'A_n_fold':          args.a_fold,     # <— note: was args.A_n_fold in your error; keep lowercase here
-    'epochs':            args.epochs,
-    'multicore':         args.multicore,
-    'pretrain':          args.pretrain,
-    'seed':              args.seed,
-    'model':             args.model,
-    'exp_smooth_beta':   getattr(args, 'exp_smooth_beta', 0.5),
-    'use_ppr_weights':   getattr(args, 'use_ppr_weights', False),
-    'ppr_weights_path':  getattr(args, 'ppr_weights_path', None),
+    'checkpoint_dir':     PATH,
+    'dataset':            args.dataset,
+    'lr':                 args.lr,
+    'decay':              args.decay,
+    'lightGCN_n_layers':  args.layer,
+    'latent_dim_rec':     args.recdim,
+    'bpr_batch_size':     args.bpr_batch,
+    'test_u_batch_size':  args.testbatch,
+    'dropout':            args.dropout,
+    'keep_prob':          args.keepprob,
+    # prefer explicit A_split if provided, else fallback to bool(a_fold)
+    'A_split':            args.A_split if hasattr(args, 'A_split') else bool(args.a_fold),
+    'A_n_fold':           args.a_fold,
+    'epochs':             args.epochs,
+    'multicore':          args.multicore,
+    'pretrain':           args.pretrain,
+    'seed':               args.seed,
+    'model':              args.model,
+    'exp_smooth_beta':    args.exp_smooth_beta,
+    'use_ppr_weights':    args.use_ppr_weights,
+    'ppr_weights_path':   args.ppr_weights_path,
 
-    # optional knobs some versions expect (safe defaults if unused)
-    'residual_alpha':    getattr(args, 'residual_alpha', 0.0),
-    'use_norm':          getattr(args, 'use_norm', False),
-    'bias_scale':        getattr(args, 'bias_scale', 1.0),
-    'use_pop_gate':      getattr(args, 'use_pop_gate', False),
-    'pop_bins':          getattr(args, 'pop_bins', 5),
+    # pop gate + factorized MLP
+    'use_pop_gate':       args.use_pop_gate,
+    'pop_embed_dim':      args.pop_embed_dim,
+    'use_factor_mlp':     args.use_factor_mlp,
+    'proj_hidden':        args.proj_hidden,
 
-    # checkpointing / scheduler (safe defaults)
-    'resume':            getattr(args, 'resume', False),
-    'resume_path':       getattr(args, 'resume_path', ''),
-    'save_every':        getattr(args, 'save_every', 5),
-    'keep_topk':         getattr(args, 'keep_topk', 0),
-    'use_scheduler':     getattr(args, 'use_scheduler', False),
-    'sched_milestones':  getattr(args, 'sched_milestones', '[200, 300]'),
-    'sched_gamma':       getattr(args, 'sched_gamma', 0.5),
+    # item-item
+    'use_item_item':      args.use_item_item,
+    'i2i_alpha':          args.i2i_alpha,
+    'i2i_path':           args.i2i_path,
+
+    # resume/scheduler
+    'resume':             args.resume,
+    'resume_path':        args.resume_path,
+    'use_scheduler':      args.use_scheduler,
+    'sched_gamma':        args.sched_gamma,
 }
 
-# -------- device --------
-import torch
+# parse pop_bins safely
+try:
+    pop_bins = ast.literal_eval(args.pop_bins) if isinstance(args.pop_bins, str) else args.pop_bins
+    if isinstance(pop_bins, (list, tuple)):
+        config['pop_bins'] = list(pop_bins)
+    else:
+        config['pop_bins'] = [50,80,95]
+except Exception:
+    config['pop_bins'] = [50,80,95]
+
+# parse scheduler milestones
+try:
+    sched_milestones = ast.literal_eval(args.sched_milestones) if isinstance(args.sched_milestones, str) else args.sched_milestones
+    if isinstance(sched_milestones, (list, tuple)):
+        config['sched_milestones'] = list(map(int, sched_milestones))
+    else:
+        config['sched_milestones'] = [120,240,360,480]
+except Exception:
+    config['sched_milestones'] = [120,240,360,480]
+
+# device
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
