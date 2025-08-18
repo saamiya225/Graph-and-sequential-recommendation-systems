@@ -1,1 +1,24 @@
+
 LightGCN_work/data/instacart/raw/
+LightGCN_work/code/checkpoints/
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+*.log
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+
+# --- OS files ---
+.DS_Store
+Thumbs.db
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+*.ipynb~
