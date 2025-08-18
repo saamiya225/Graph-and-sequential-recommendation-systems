@@ -1,102 +1,268 @@
+# code/dataloader.py
+"""
+Dataset and graph utilities for LightGCN—compatible with this repo.
+Reads train.txt/test.txt under ../data/<dataset>/ and builds the bipartite graph.
+"""
+
 import os
-import ast
+from os.path import join
+import numpy as np
+import scipy.sparse as sp
 import torch
-import multiprocessing
-from os.path import dirname, join
-from parse import parse_args
+from torch.utils.data import Dataset
+import world
+from world import cprint
+from time import time
 
-# workaround for Mac/KMP issue (if needed)
-os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
+class BasicDataset(Dataset):
+    """
+    Compatibility shell. In this fork we use Loader as the concrete dataset.
+    """
+    def __init__(self):
+        pass
 
-args = parse_args()
+    @property
+    def n_users(self):
+        raise NotImplementedError
 
-def cprint(*args_, **kwargs):
-    print(*args_, **kwargs)
+    @property
+    def m_items(self):
+        raise NotImplementedError
 
-# Basic globals
-seed        = args.seed
-dataset     = args.dataset
-comment     = args.comment
-tensorboard = args.tensorboard
-LOAD        = args.load
-model_name  = args.model
-TRAIN_epochs= args.epochs
-topks       = ast.literal_eval(args.topks) if isinstance(args.topks, str) else args.topks
+    @property
+    def trainDataSize(self):
+        raise NotImplementedError
 
-# CORES
-try:
-    CORES = multiprocessing.cpu_count() // 2
-except:
-    CORES = 4
+    @property
+    def testDict(self):
+        raise NotImplementedError
 
-# Paths
-ROOT_PATH  = dirname(dirname(__file__))
-CODE_PATH  = join(ROOT_PATH, 'code')
-DATA_PATH  = join(ROOT_PATH, 'data')
-BOARD_PATH = join(CODE_PATH, 'runs')
-PATH       = args.checkpoint_dir
+    @property
+    def allPos(self):
+        raise NotImplementedError
 
-# config dict
-config = {
-    'checkpoint_dir':     PATH,
-    'dataset':            args.dataset,
-    'lr':                 args.lr,
-    'decay':              args.decay,
-    'lightGCN_n_layers':  args.layer,
-    'latent_dim_rec':     args.recdim,
-    'bpr_batch_size':     args.bpr_batch,
-    'test_u_batch_size':  args.testbatch,
-    'dropout':            args.dropout,
-    'keep_prob':          args.keepprob,
-    # prefer explicit A_split if provided, else fallback to bool(a_fold)
-    'A_split':            args.A_split if hasattr(args, 'A_split') else bool(args.a_fold),
-    'A_n_fold':           args.a_fold,
-    'epochs':             args.epochs,
-    'multicore':          args.multicore,
-    'pretrain':           args.pretrain,
-    'seed':               args.seed,
-    'model':              args.model,
-    'exp_smooth_beta':    args.exp_smooth_beta,
-    'use_ppr_weights':    args.use_ppr_weights,
-    'ppr_weights_path':   args.ppr_weights_path,
+    def getUserItemFeedback(self, users, items):
+        raise NotImplementedError
 
-    # pop gate + factorized MLP
-    'use_pop_gate':       args.use_pop_gate,
-    'pop_embed_dim':      args.pop_embed_dim,
-    'use_factor_mlp':     args.use_factor_mlp,
-    'proj_hidden':        args.proj_hidden,
+    def getUserPosItems(self, users):
+        raise NotImplementedError
 
-    # item-item
-    'use_item_item':      args.use_item_item,
-    'i2i_alpha':          args.i2i_alpha,
-    'i2i_path':           args.i2i_path,
+    def getSparseGraph(self):
+        raise NotImplementedError
 
-    # resume/scheduler
-    'resume':             args.resume,
-    'resume_path':        args.resume_path,
-    'use_scheduler':      args.use_scheduler,
-    'sched_gamma':        args.sched_gamma,
-}
 
-# parse pop_bins safely
-try:
-    pop_bins = ast.literal_eval(args.pop_bins) if isinstance(args.pop_bins, str) else args.pop_bins
-    if isinstance(pop_bins, (list, tuple)):
-        config['pop_bins'] = list(pop_bins)
-    else:
-        config['pop_bins'] = [50,80,95]
-except Exception:
-    config['pop_bins'] = [50,80,95]
+class Loader(BasicDataset):
+    """
+    Concrete dataset loader: reads <path>/train.txt and <path>/test.txt
+    and builds normalized adjacency for LightGCN.
+    """
+    def __init__(self, config=world.config, path=None):
+        # Resolve dataset path
+        if path is None:
+            path = join(world.DATA_PATH, world.dataset)
+        self.path = path
 
-# parse scheduler milestones
-try:
-    sched_milestones = ast.literal_eval(args.sched_milestones) if isinstance(args.sched_milestones, str) else args.sched_milestones
-    if isinstance(sched_milestones, (list, tuple)):
-        config['sched_milestones'] = list(map(int, sched_milestones))
-    else:
-        config['sched_milestones'] = [120,240,360,480]
-except Exception:
-    config['sched_milestones'] = [120,240,360,480]
+        cprint(f'loading [{self.path}]')
+        self.split = config.get('A_split', False)
+        self.folds = config.get('A_n_fold', 100)
 
-# device
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.mode_dict = {'train': 0, 'test': 1}
+        self.mode = self.mode_dict['train']
+
+        # will be determined while parsing
+        self.n_user = 0
+        self.m_item = 0
+
+        train_file = join(self.path, 'train.txt')
+        test_file  = join(self.path, 'test.txt')
+
+        trainUniqueUsers, trainUsers, trainItems = [], [], []
+        testUniqueUsers,  testUsers,  testItems  = [], [], []
+
+        self.traindataSize = 0
+        self.testDataSize  = 0
+
+        # ----- read train -----
+        with open(train_file, 'r') as f:
+            for l in f:
+                if not l.strip():
+                    continue
+                cols = l.strip().split()
+                uid = int(cols[0])
+                items = [int(i) for i in cols[1:]]
+                if not items:
+                    continue
+                self.n_user = max(self.n_user, uid)
+                self.m_item = max(self.m_item, max(items))
+                trainUniqueUsers.append(uid)
+                trainUsers.extend([uid] * len(items))
+                trainItems.extend(items)
+                self.traindataSize += len(items)
+
+        # ----- read test -----
+        with open(test_file, 'r') as f:
+            for l in f:
+                if not l.strip():
+                    continue
+                cols = l.strip().split()
+                uid = int(cols[0])
+                items = [int(i) for i in cols[1:]]
+                if not items:
+                    continue
+                self.n_user = max(self.n_user, uid)
+                self.m_item = max(self.m_item, max(items))
+                testUniqueUsers.append(uid)
+                testUsers.extend([uid] * len(items))
+                testItems.extend(items)
+                self.testDataSize += len(items)
+
+        # +1 because indices are zero-based
+        self.n_user += 1
+        self.m_item += 1
+
+        self.trainUniqueUsers = np.array(trainUniqueUsers, dtype=np.int64)
+        self.trainUser = np.array(trainUsers, dtype=np.int64)
+        self.trainItem = np.array(trainItems, dtype=np.int64)
+
+        self.testUniqueUsers = np.array(testUniqueUsers, dtype=np.int64)
+        self.testUser = np.array(testUsers, dtype=np.int64)
+        self.testItem = np.array(testItems, dtype=np.int64)
+
+        print(f"{self.trainDataSize} interactions for training")
+        print(f"{self.testDataSize} interactions for testing")
+        print(f"{world.dataset} Sparsity : {(self.trainDataSize + self.testDataSize) / self.n_users / self.m_items:.12f}")
+
+        # Build (users,items) bipartite matrix
+        self.UserItemNet = sp.csr_matrix(
+            (np.ones(len(self.trainUser), dtype=np.float32), (self.trainUser, self.trainItem)),
+            shape=(self.n_user, self.m_item)
+        )
+        self.users_D = np.array(self.UserItemNet.sum(axis=1)).squeeze()
+        self.users_D[self.users_D == 0.] = 1.
+        self.items_D = np.array(self.UserItemNet.sum(axis=0)).squeeze()
+        self.items_D[self.items_D == 0.] = 1.
+
+        # Precompute all positives and test dict
+        self._allPos = self.getUserPosItems(list(range(self.n_user)))
+        self.__testDict = self.__build_test()
+        print(f"{world.dataset} is ready to go")
+
+        self.Graph = None  # will cache adj (or folds) after getSparseGraph()
+
+    # ---------- properties ----------
+    @property
+    def n_users(self):
+        return self.n_user
+
+    @property
+    def m_items(self):
+        return self.m_item
+
+    @property
+    def trainDataSize(self):
+        return self.traindataSize
+
+    @property
+    def testDict(self):
+        return self.__testDict
+
+    @property
+    def allPos(self):
+        return self._allPos
+
+    # ---------- helpers ----------
+    def __build_test(self):
+        """
+        Returns dict: {user: [items]}
+        """
+        test_data = {}
+        for u, i in zip(self.testUser, self.testItem):
+            if u in test_data:
+                test_data[u].append(i)
+            else:
+                test_data[u] = [i]
+        return test_data
+
+    def getUserItemFeedback(self, users, items):
+        # returns a vector of 0/1 for whether (u,i) exists in train
+        arr = np.array(self.UserItemNet[users, items]).astype('uint8').reshape((-1,))
+        return arr
+
+    def getUserPosItems(self, users):
+        posItems = []
+        for u in users:
+            posItems.append(self.UserItemNet[u].indices)
+        return posItems
+
+    # ---------- adjacency ----------
+    def _convert_sp_mat_to_sp_tensor(self, X):
+        coo = X.tocoo().astype(np.float32)
+        row = torch.from_numpy(coo.row).long()
+        col = torch.from_numpy(coo.col).long()
+        index = torch.stack([row, col], dim=0)
+        data = torch.from_numpy(coo.data).float()
+        return torch.sparse_coo_tensor(index, data, torch.Size(coo.shape))
+
+    def _split_A_hat(self, A):
+        A_fold = []
+        n_all = self.n_users + self.m_items
+        fold_len = n_all // self.folds
+        for i_fold in range(self.folds):
+            start = i_fold * fold_len
+            end = n_all if i_fold == self.folds - 1 else (i_fold + 1) * fold_len
+            A_fold.append(self._convert_sp_mat_to_sp_tensor(A[start:end]).coalesce().to(world.device))
+        return A_fold
+
+    def getSparseGraph(self):
+        """
+        Build (or load) the normalized adjacency for LightGCN:
+            A = [0, R; R^T, 0]
+            L = D^{-1/2} A D^{-1/2}
+        """
+        print("loading adjacency matrix")
+        if self.Graph is not None:
+            return self.Graph
+
+        pre_adj_path = join(self.path, 's_pre_adj_mat.npz')
+        try:
+            norm_adj = sp.load_npz(pre_adj_path)
+            print("successfully loaded...")
+        except Exception:
+            print("generating adjacency matrix")
+            s = time()
+            n_all = self.n_users + self.m_items
+            adj_mat = sp.dok_matrix((n_all, n_all), dtype=np.float32)
+            adj_mat = adj_mat.tolil()
+
+            R = self.UserItemNet.tolil()
+            adj_mat[:self.n_users, self.n_users:] = R
+            adj_mat[self.n_users:, :self.n_users] = R.T
+            adj_mat = adj_mat.tocsr()
+
+            # symmetric normalize: D^{-1/2} A D^{-1/2}
+            rowsum = np.array(adj_mat.sum(axis=1)).flatten()
+            d_inv = np.power(rowsum, -0.5, where=rowsum!=0)
+            d_inv[np.isinf(d_inv)] = 0.
+            D_inv = sp.diags(d_inv)
+
+            norm_adj = D_inv.dot(adj_mat).dot(D_inv).tocsr()
+
+            print(f"costing {time() - s:.2f}s, saved norm_mat...")
+            sp.save_npz(pre_adj_path, norm_adj)
+
+        if self.split:
+            self.Graph = self._split_A_hat(norm_adj)
+            print("done split matrix")
+        else:
+            self.Graph = self._convert_sp_mat_to_sp_tensor(norm_adj).coalesce().to(world.device)
+            print("don't split the matrix")
+        return self.Graph
+
+    # ---------- dataset protocol ----------
+    def __getitem__(self, idx):
+        # used by sampler (e.g., returns a user index)
+        return self.trainUniqueUsers[idx]
+
+    def __len__(self):
+        # number of users with at least one interaction in train
+        return len(self.trainUniqueUsers)

@@ -14,19 +14,21 @@ def cprint(*args_, **kwargs):
     print(*args_, **kwargs)
 
 # Basic globals
-seed        = args.seed
-dataset     = args.dataset
-comment     = args.comment
-tensorboard = args.tensorboard
-LOAD        = args.load
-model_name  = args.model
-TRAIN_epochs= args.epochs
-topks       = ast.literal_eval(args.topks) if isinstance(args.topks, str) else args.topks
+seed         = args.seed
+dataset      = args.dataset
+comment      = args.comment
+tensorboard  = args.tensorboard
+LOAD         = args.load
+model_name   = args.model
+TRAIN_epochs = args.epochs
+
+# topks may be a string like "[20,50]"
+topks = ast.literal_eval(args.topks) if isinstance(args.topks, str) else args.topks
 
 # CORES
 try:
     CORES = multiprocessing.cpu_count() // 2
-except:
+except Exception:
     CORES = 4
 
 # Paths
@@ -34,9 +36,9 @@ ROOT_PATH  = dirname(dirname(__file__))
 CODE_PATH  = join(ROOT_PATH, 'code')
 DATA_PATH  = join(ROOT_PATH, 'data')
 BOARD_PATH = join(CODE_PATH, 'runs')
-PATH       = args.checkpoint_dir
+PATH       = args.checkpoint_dir or './checkpoints'
 
-# config dict
+# Build config dict
 config = {
     'checkpoint_dir':     PATH,
     'dataset':            args.dataset,
@@ -56,6 +58,8 @@ config = {
     'pretrain':           args.pretrain,
     'seed':               args.seed,
     'model':              args.model,
+
+    # Layer weighting / smoothing / PPR
     'exp_smooth_beta':    args.exp_smooth_beta,
     'use_ppr_weights':    args.use_ppr_weights,
     'ppr_weights_path':   args.ppr_weights_path,
@@ -78,25 +82,37 @@ config = {
     'sched_gamma':        args.sched_gamma,
 }
 
-# parse pop_bins safely
+# ---- Normalize pop_bins to int (robust) ----
+# Accepts: 10, "10", or even "[10]" -> 10
 try:
-    pop_bins = ast.literal_eval(args.pop_bins) if isinstance(args.pop_bins, str) else args.pop_bins
-    if isinstance(pop_bins, (list, tuple)):
-        config['pop_bins'] = list(pop_bins)
+    if isinstance(args.pop_bins, int):
+        config['pop_bins'] = args.pop_bins
+    elif isinstance(args.pop_bins, str):
+        val = ast.literal_eval(args.pop_bins)
+        if isinstance(val, (list, tuple)) and len(val) > 0:
+            config['pop_bins'] = int(val[0])
+        else:
+            config['pop_bins'] = int(val)
     else:
-        config['pop_bins'] = [50,80,95]
+        config['pop_bins'] = 10
 except Exception:
-    config['pop_bins'] = [50,80,95]
+    config['pop_bins'] = 10
 
-# parse scheduler milestones
+# ---- Parse scheduler milestones as a list[int] ----
+# Accepts: [120,240] or " [120, 240] "
 try:
-    sched_milestones = ast.literal_eval(args.sched_milestones) if isinstance(args.sched_milestones, str) else args.sched_milestones
-    if isinstance(sched_milestones, (list, tuple)):
-        config['sched_milestones'] = list(map(int, sched_milestones))
+    if isinstance(args.sched_milestones, str):
+        parsed = ast.literal_eval(args.sched_milestones)
+        if isinstance(parsed, (list, tuple)):
+            config['sched_milestones'] = [int(x) for x in parsed]
+        else:
+            config['sched_milestones'] = [120, 240, 360, 480]
+    elif isinstance(args.sched_milestones, (list, tuple)):
+        config['sched_milestones'] = [int(x) for x in args.sched_milestones]
     else:
-        config['sched_milestones'] = [120,240,360,480]
+        config['sched_milestones'] = [120, 240, 360, 480]
 except Exception:
-    config['sched_milestones'] = [120,240,360,480]
+    config['sched_milestones'] = [120, 240, 360, 480]
 
 # device
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
