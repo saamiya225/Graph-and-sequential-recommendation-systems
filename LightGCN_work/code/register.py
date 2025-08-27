@@ -1,16 +1,25 @@
-# register.py — dataset + model registry (robust)
+"""
+register.py — Dataset & model registry (robust variant)
+
+- Print run-time flags from `world` for quick visibility
+- Import a concrete dataset loader (`Loader`) from dataloader.py
+- Instantiate the dataset (supports both Loader(config) and Loader())
+- Build a MODEL registry from classes present in model.py
+- Validate that the requested model (world.model_name) exists
+"""
 
 import world
 import model
 from world import cprint
 
+# Quick run context printout (visible at startup)
 print("comment:", world.comment)
 print("tensorboard:", world.tensorboard)
 print("LOAD:", world.LOAD)
 print("Weight path:", world.PATH)
 
-# ---- Dataset ----
-# Use the concrete loader; BasicDataset is abstract and will raise NotImplementedError.
+# ---- Dataset --------------------------------------------------------------
+# Expect a concrete Loader in dataloader.py (BasicDataset is abstract).
 try:
     from dataloader import Loader
 except ImportError as e:
@@ -19,22 +28,25 @@ except ImportError as e:
         "BasicDataset is abstract and cannot be instantiated."
     ) from e
 
-# Try the two common constructor signatures
+# Support both common constructor signatures across forks:
+#   1) Loader(config) — preferred
+#   2) Loader()       — some forks read world.config internally
 try:
-    dataset = Loader(world.config)   # many forks accept config
+    dataset = Loader(world.config)
 except TypeError:
-    dataset = Loader()               # some forks are arg-less and read world.config internally
+    dataset = Loader()
 
-# ---- Model registry (only add what exists) ----
+# ---- Model registry -------------------------------------------------------
 MODELS = {}
 
+# Register only what actually exists to avoid import-time errors.
 if hasattr(model, 'PureMF'):
     MODELS['mf'] = model.PureMF
 
 if hasattr(model, 'LightGCN'):
     MODELS['lgn'] = model.LightGCN
 
-# Sanity check for the requested model
+# ---- Sanity check ---------------------------------------------------------
 if world.model_name not in MODELS:
     raise ValueError(
         f"Requested model '{world.model_name}' is not available. "

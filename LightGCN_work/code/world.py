@@ -1,3 +1,17 @@
+"""
+world.py — Global configuration and environment setup for training/evaluation.
+
+This script:
+- Parses command-line arguments
+- Sets up environment variables and paths
+- Defines hardware resources (CPU cores, CUDA device)
+- Prepares a central `config` dictionary containing all hyperparameters
+  and options used throughout the project
+
+Inputs: Command-line arguments (see parse.py for details)
+Outputs: Global variables & `config` dict used by other modules
+"""
+
 import os
 import ast
 import torch
@@ -5,40 +19,41 @@ import multiprocessing
 from os.path import dirname, join
 from parse import parse_args
 
-# workaround for Mac/KMP issue (if needed)
+# Prevents duplicate library errors with some BLAS backends
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 
+# Parse CLI arguments
 args = parse_args()
 
-def cprint(*args_, **kwargs):
+# Simple print wrapper (could be extended for colored/conditional logging)
+def cprint(*args_, **kwargs): 
     print(*args_, **kwargs)
 
-# Basic globals
-seed         = args.seed
-dataset      = args.dataset
-comment      = args.comment
-tensorboard  = args.tensorboard
-LOAD         = args.load
-model_name   = args.model
-TRAIN_epochs = args.epochs
+# Core parameters from args
+seed        = args.seed
+dataset     = args.dataset
+comment     = args.comment
+tensorboard = args.tensorboard
+LOAD        = args.load
+model_name  = args.model
+TRAIN_epochs= args.epochs
+# Parse top-k list if provided as a string, else use directly
+topks       = ast.literal_eval(args.topks) if isinstance(args.topks, str) else args.topks
 
-# topks may be a string like "[20,50]"
-topks = ast.literal_eval(args.topks) if isinstance(args.topks, str) else args.topks
-
-# CORES
+# CPU cores: default to half available, fallback = 4
 try:
     CORES = multiprocessing.cpu_count() // 2
-except Exception:
+except:
     CORES = 4
 
-# Paths
+# Define project paths
 ROOT_PATH  = dirname(dirname(__file__))
 CODE_PATH  = join(ROOT_PATH, 'code')
 DATA_PATH  = join(ROOT_PATH, 'data')
 BOARD_PATH = join(CODE_PATH, 'runs')
-PATH       = args.checkpoint_dir or './checkpoints'
+PATH       = args.checkpoint_dir
 
-# Build config dict
+# Central configuration dictionary (passed around to other modules)
 config = {
     'checkpoint_dir':     PATH,
     'dataset':            args.dataset,
@@ -50,8 +65,7 @@ config = {
     'test_u_batch_size':  args.testbatch,
     'dropout':            args.dropout,
     'keep_prob':          args.keepprob,
-    # prefer explicit A_split if provided, else fallback to bool(a_fold)
-    'A_split':            args.A_split if hasattr(args, 'A_split') else bool(args.a_fold),
+    'A_split':            args.A_split,
     'A_n_fold':           args.a_fold,
     'epochs':             args.epochs,
     'multicore':          args.multicore,
@@ -59,60 +73,37 @@ config = {
     'seed':               args.seed,
     'model':              args.model,
 
-    # Layer weighting / smoothing / PPR
+    # global smoothing / personalized PageRank (optional)
     'exp_smooth_beta':    args.exp_smooth_beta,
     'use_ppr_weights':    args.use_ppr_weights,
     'ppr_weights_path':   args.ppr_weights_path,
 
-    # pop gate + factorized MLP
-    'use_pop_gate':       args.use_pop_gate,
-    'pop_embed_dim':      args.pop_embed_dim,
-    'use_factor_mlp':     args.use_factor_mlp,
-    'proj_hidden':        args.proj_hidden,
-
-    # item-item
-    'use_item_item':      args.use_item_item,
-    'i2i_alpha':          args.i2i_alpha,
-    'i2i_path':           args.i2i_path,
-
-    # resume/scheduler
-    'resume':             args.resume,
-    'resume_path':        args.resume_path,
+    # scheduler
     'use_scheduler':      args.use_scheduler,
     'sched_gamma':        args.sched_gamma,
 }
 
-# ---- Normalize pop_bins to int (robust) ----
-# Accepts: 10, "10", or even "[10]" -> 10
+# Scheduler milestones: fallback if args are missing/badly formatted
 try:
-    if isinstance(args.pop_bins, int):
-        config['pop_bins'] = args.pop_bins
-    elif isinstance(args.pop_bins, str):
-        val = ast.literal_eval(args.pop_bins)
-        if isinstance(val, (list, tuple)) and len(val) > 0:
-            config['pop_bins'] = int(val[0])
-        else:
-            config['pop_bins'] = int(val)
-    else:
-        config['pop_bins'] = 10
-except Exception:
-    config['pop_bins'] = 10
-
-# ---- Parse scheduler milestones as a list[int] ----
-# Accepts: [120,240] or " [120, 240] "
-try:
-    if isinstance(args.sched_milestones, str):
-        parsed = ast.literal_eval(args.sched_milestones)
-        if isinstance(parsed, (list, tuple)):
-            config['sched_milestones'] = [int(x) for x in parsed]
-        else:
-            config['sched_milestones'] = [120, 240, 360, 480]
-    elif isinstance(args.sched_milestones, (list, tuple)):
-        config['sched_milestones'] = [int(x) for x in args.sched_milestones]
-    else:
-        config['sched_milestones'] = [120, 240, 360, 480]
+    config['sched_milestones'] = (
+        list(map(int, ast.literal_eval(args.sched_milestones)))
+        if isinstance(args.sched_milestones, str) 
+        else list(args.sched_milestones)
+    )
 except Exception:
     config['sched_milestones'] = [120, 240, 360, 480]
 
-# device
+# Popularity gate parameters
+config['use_pop_gate']       = args.use_pop_gate
+config['pop_hidden']         = args.pop_hidden
+config['gate_hidden']        = args.gate_hidden
+config['gate_entropy_coeff'] = args.gate_entropy_coeff
+config['pop_gate_temp']      = args.pop_gate_temp
+
+# Item-item recommendation augmentation
+config['use_item_item']      = args.use_item_item
+config['i2i_path']           = args.i2i_path
+config['i2i_alpha']          = args.i2i_alpha
+
+# Select device (GPU if available, else CPU)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

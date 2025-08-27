@@ -1,7 +1,15 @@
 # code/dataloader.py
 """
-Dataset and graph utilities for LightGCN—compatible with this repo.
-Reads train.txt/test.txt under ../data/<dataset>/ and builds the bipartite graph.
+Dataset and graph utilities for LightGCN — active and required in this repo.
+
+This script is responsible for:
+1. Reading `train.txt` and `test.txt` from the dataset folder.
+2. Constructing the bipartite user–item graph.
+3. Providing methods for accessing positive interactions, test sets, 
+   and normalized adjacency matrices for LightGCN training.
+
+Unlike the older "PPR weight" or "cache graph" scripts, THIS FILE IS NEEDED.
+It directly feeds the model with graph structure and user–item interactions.
 """
 
 import os
@@ -14,75 +22,64 @@ import world
 from world import cprint
 from time import time
 
+
 class BasicDataset(Dataset):
     """
-    Compatibility shell. In this fork we use Loader as the concrete dataset.
+    Abstract dataset wrapper for LightGCN.
+    - Provides properties (n_users, m_items, etc.) that subclasses must implement.
+    - Loader (below) implements all of these for real data.
     """
     def __init__(self):
         pass
 
     @property
-    def n_users(self):
-        raise NotImplementedError
-
+    def n_users(self): raise NotImplementedError
     @property
-    def m_items(self):
-        raise NotImplementedError
-
+    def m_items(self): raise NotImplementedError
     @property
-    def trainDataSize(self):
-        raise NotImplementedError
-
+    def trainDataSize(self): raise NotImplementedError
     @property
-    def testDict(self):
-        raise NotImplementedError
-
+    def testDict(self): raise NotImplementedError
     @property
-    def allPos(self):
-        raise NotImplementedError
+    def allPos(self): raise NotImplementedError
 
-    def getUserItemFeedback(self, users, items):
-        raise NotImplementedError
-
-    def getUserPosItems(self, users):
-        raise NotImplementedError
-
-    def getSparseGraph(self):
-        raise NotImplementedError
+    def getUserItemFeedback(self, users, items): raise NotImplementedError
+    def getUserPosItems(self, users): raise NotImplementedError
+    def getSparseGraph(self): raise NotImplementedError
 
 
 class Loader(BasicDataset):
     """
-    Concrete dataset loader: reads <path>/train.txt and <path>/test.txt
-    and builds normalized adjacency for LightGCN.
+    Main dataset loader used in our pipeline.
+
+    Responsibilities:
+    - Reads interactions from `<dataset>/train.txt` and `<dataset>/test.txt`.
+    - Builds user–item bipartite interaction matrix.
+    - Provides normalized adjacency for LightGCN propagation.
+    - Stores per-user positives (train) and test dictionaries.
     """
+
     def __init__(self, config=world.config, path=None):
         # Resolve dataset path
         if path is None:
             path = join(world.DATA_PATH, world.dataset)
         self.path = path
-
         cprint(f'loading [{self.path}]')
-        self.split = config.get('A_split', False)
-        self.folds = config.get('A_n_fold', 100)
 
-        self.mode_dict = {'train': 0, 'test': 1}
-        self.mode = self.mode_dict['train']
+        # Config flags (from world.config)
+        self.split = config.get('A_split', False)   # whether to split adjacency
+        self.folds = config.get('A_n_fold', 100)    # number of folds if split
 
-        # will be determined while parsing
-        self.n_user = 0
-        self.m_item = 0
+        # --- storage placeholders ---
+        self.n_user, self.m_item = 0, 0
+        self.traindataSize, self.testDataSize = 0, 0
 
-        train_file = join(self.path, 'train.txt')
-        test_file  = join(self.path, 'test.txt')
-
+        # Containers for training/test interactions
         trainUniqueUsers, trainUsers, trainItems = [], [], []
         testUniqueUsers,  testUsers,  testItems  = [], [], []
 
-        self.traindataSize = 0
-        self.testDataSize  = 0
-
-        # ----- read train -----
+        # --- parse train file ---
+        train_file = join(self.path, 'train.txt')
         with open(train_file, 'r') as f:
             for l in f:
                 if not l.strip():
@@ -99,7 +96,8 @@ class Loader(BasicDataset):
                 trainItems.extend(items)
                 self.traindataSize += len(items)
 
-        # ----- read test -----
+        # --- parse test file ---
+        test_file = join(self.path, 'test.txt')
         with open(test_file, 'r') as f:
             for l in f:
                 if not l.strip():
@@ -116,86 +114,74 @@ class Loader(BasicDataset):
                 testItems.extend(items)
                 self.testDataSize += len(items)
 
-        # +1 because indices are zero-based
+        # Convert to numpy arrays
         self.n_user += 1
         self.m_item += 1
-
         self.trainUniqueUsers = np.array(trainUniqueUsers, dtype=np.int64)
         self.trainUser = np.array(trainUsers, dtype=np.int64)
         self.trainItem = np.array(trainItems, dtype=np.int64)
-
         self.testUniqueUsers = np.array(testUniqueUsers, dtype=np.int64)
         self.testUser = np.array(testUsers, dtype=np.int64)
         self.testItem = np.array(testItems, dtype=np.int64)
 
+        # Logging
         print(f"{self.trainDataSize} interactions for training")
         print(f"{self.testDataSize} interactions for testing")
         print(f"{world.dataset} Sparsity : {(self.trainDataSize + self.testDataSize) / self.n_users / self.m_items:.12f}")
 
-        # Build (users,items) bipartite matrix
+        # Build CSR user–item interaction matrix
         self.UserItemNet = sp.csr_matrix(
             (np.ones(len(self.trainUser), dtype=np.float32), (self.trainUser, self.trainItem)),
             shape=(self.n_user, self.m_item)
         )
+
+        # Degrees for normalization
         self.users_D = np.array(self.UserItemNet.sum(axis=1)).squeeze()
         self.users_D[self.users_D == 0.] = 1.
         self.items_D = np.array(self.UserItemNet.sum(axis=0)).squeeze()
         self.items_D[self.items_D == 0.] = 1.
 
-        # Precompute all positives and test dict
+        # Precompute positives and test dict
         self._allPos = self.getUserPosItems(list(range(self.n_user)))
         self.__testDict = self.__build_test()
         print(f"{world.dataset} is ready to go")
 
-        self.Graph = None  # will cache adj (or folds) after getSparseGraph()
+        # Graph cache placeholder
+        self.Graph = None
 
-    # ---------- properties ----------
+    # ---------- basic properties ----------
     @property
-    def n_users(self):
-        return self.n_user
-
+    def n_users(self): return self.n_user
     @property
-    def m_items(self):
-        return self.m_item
-
+    def m_items(self): return self.m_item
     @property
-    def trainDataSize(self):
-        return self.traindataSize
-
+    def trainDataSize(self): return self.traindataSize
     @property
-    def testDict(self):
-        return self.__testDict
-
+    def testDict(self): return self.__testDict
     @property
-    def allPos(self):
-        return self._allPos
+    def allPos(self): return self._allPos
 
     # ---------- helpers ----------
     def __build_test(self):
-        """
-        Returns dict: {user: [items]}
-        """
+        """Build {user: [test_items]} dict for evaluation."""
         test_data = {}
         for u, i in zip(self.testUser, self.testItem):
-            if u in test_data:
-                test_data[u].append(i)
-            else:
-                test_data[u] = [i]
+            if u in test_data: test_data[u].append(i)
+            else: test_data[u] = [i]
         return test_data
 
     def getUserItemFeedback(self, users, items):
-        # returns a vector of 0/1 for whether (u,i) exists in train
+        """Binary feedback: 1 if (u,i) in train interactions, else 0."""
         arr = np.array(self.UserItemNet[users, items]).astype('uint8').reshape((-1,))
         return arr
 
     def getUserPosItems(self, users):
-        posItems = []
-        for u in users:
-            posItems.append(self.UserItemNet[u].indices)
-        return posItems
+        """Return positive items for each user from training set."""
+        return [self.UserItemNet[u].indices for u in users]
 
     # ---------- adjacency ----------
     def _convert_sp_mat_to_sp_tensor(self, X):
+        """Convert scipy sparse to torch sparse tensor."""
         coo = X.tocoo().astype(np.float32)
         row = torch.from_numpy(coo.row).long()
         col = torch.from_numpy(coo.col).long()
@@ -204,6 +190,7 @@ class Loader(BasicDataset):
         return torch.sparse_coo_tensor(index, data, torch.Size(coo.shape))
 
     def _split_A_hat(self, A):
+        """Optionally split adjacency into folds for GPU memory efficiency."""
         A_fold = []
         n_all = self.n_users + self.m_items
         fold_len = n_all // self.folds
@@ -215,7 +202,7 @@ class Loader(BasicDataset):
 
     def getSparseGraph(self):
         """
-        Build (or load) the normalized adjacency for LightGCN:
+        Build or load normalized adjacency for LightGCN:
             A = [0, R; R^T, 0]
             L = D^{-1/2} A D^{-1/2}
         """
@@ -231,25 +218,25 @@ class Loader(BasicDataset):
             print("generating adjacency matrix")
             s = time()
             n_all = self.n_users + self.m_items
-            adj_mat = sp.dok_matrix((n_all, n_all), dtype=np.float32)
-            adj_mat = adj_mat.tolil()
 
+            # Build user–item bipartite adjacency
+            adj_mat = sp.dok_matrix((n_all, n_all), dtype=np.float32).tolil()
             R = self.UserItemNet.tolil()
             adj_mat[:self.n_users, self.n_users:] = R
             adj_mat[self.n_users:, :self.n_users] = R.T
             adj_mat = adj_mat.tocsr()
 
-            # symmetric normalize: D^{-1/2} A D^{-1/2}
+            # Symmetric normalization
             rowsum = np.array(adj_mat.sum(axis=1)).flatten()
             d_inv = np.power(rowsum, -0.5, where=rowsum!=0)
             d_inv[np.isinf(d_inv)] = 0.
             D_inv = sp.diags(d_inv)
-
             norm_adj = D_inv.dot(adj_mat).dot(D_inv).tocsr()
 
             print(f"costing {time() - s:.2f}s, saved norm_mat...")
             sp.save_npz(pre_adj_path, norm_adj)
 
+        # Cache in memory (split or not)
         if self.split:
             self.Graph = self._split_A_hat(norm_adj)
             print("done split matrix")
@@ -260,9 +247,9 @@ class Loader(BasicDataset):
 
     # ---------- dataset protocol ----------
     def __getitem__(self, idx):
-        # used by sampler (e.g., returns a user index)
+        """Return user index (for sampling)."""
         return self.trainUniqueUsers[idx]
 
     def __len__(self):
-        # number of users with at least one interaction in train
+        """Number of users with at least one training interaction."""
         return len(self.trainUniqueUsers)

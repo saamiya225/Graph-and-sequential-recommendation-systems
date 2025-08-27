@@ -3,8 +3,10 @@ Created on Mar 1, 2020
 Pytorch Implementation of LightGCN in
 Xiangnan He et al. LightGCN: Simplifying and Powering Graph Convolution Network for Recommendation
 
-@author: Jianbai Ye (gusye@mail.ustc.edu.cn)
+@author: Jianbai Ye
+Updated: with comments for clarity
 '''
+
 import world
 import torch
 from torch import nn, optim
@@ -13,10 +15,13 @@ from torch import log
 from dataloader import BasicDataset
 from time import time
 from model import LightGCN
-#from model import PairWiseModel
 from sklearn.metrics import roc_auc_score
 import random
 import os
+
+# ==================== Negative Sampling Extension ====================
+# Try to use the fast C++ sampler for BPR negative sampling.
+# If unavailable, we fall back to the slower Python version.
 try:
     from cppimport import imp_from_filepath
     from os.path import join, dirname
@@ -29,20 +34,29 @@ except:
     sample_ext = False
 
 
+# ==================== BPR Loss ====================
 class BPRLoss:
-    def __init__(self,
-                 recmodel : nn.Module,
-                 config : dict):
+    """
+    Bayesian Personalized Ranking (BPR) loss wrapper.
+
+    - Handles forward pass through model’s bpr_loss()
+    - Adds L2 regularization (weight decay)
+    - Applies optimizer step
+    """
+
+    def __init__(self, recmodel: nn.Module, config: dict):
         self.model = recmodel
         self.weight_decay = config['decay']
         self.lr = config['lr']
         self.opt = optim.Adam(recmodel.parameters(), lr=self.lr)
 
     def stageOne(self, users, pos, neg):
+        # Forward pass: compute BPR + reg loss
         loss, reg_loss = self.model.bpr_loss(users, pos, neg)
-        reg_loss = reg_loss*self.weight_decay
+        reg_loss = reg_loss * self.weight_decay
         loss = loss + reg_loss
 
+        # Backprop + update
         self.opt.zero_grad()
         loss.backward()
         self.opt.step()
@@ -50,10 +64,15 @@ class BPRLoss:
         return loss.cpu().item()
 
 
-def UniformSample_original(dataset, neg_ratio = 1):
-    dataset : BasicDataset
+# ==================== Sampling ====================
+def UniformSample_original(dataset, neg_ratio=1):
+    """
+    Wrapper around sampling.
+    If C++ extension is available, use it.
+    Otherwise fall back to Python implementation.
+    """
+    dataset: BasicDataset
     allPos = dataset.allPos
-    start = time()
     if sample_ext:
         S = sampling.sample_negative(dataset.n_users, dataset.m_items,
                                      dataset.trainDataSize, allPos, neg_ratio)
@@ -61,219 +80,138 @@ def UniformSample_original(dataset, neg_ratio = 1):
         S = UniformSample_original_python(dataset)
     return S
 
+
 def UniformSample_original_python(dataset):
     """
-    the original impliment of BPR Sampling in LightGCN
-    :return:
-        np.array
+    Python implementation of uniform negative sampling for BPR.
+    For each user:
+        - Pick one positive item
+        - Pick one random negative item not in user’s history
     """
-    total_start = time()
-    dataset : BasicDataset
+    dataset: BasicDataset
     user_num = dataset.trainDataSize
     users = np.random.randint(0, dataset.n_users, user_num)
     allPos = dataset.allPos
     S = []
-    sample_time1 = 0.
-    sample_time2 = 0.
-    for i, user in enumerate(users):
-        start = time()
+
+    for user in users:
         posForUser = allPos[user]
         if len(posForUser) == 0:
             continue
-        sample_time2 += time() - start
-        posindex = np.random.randint(0, len(posForUser))
-        positem = posForUser[posindex]
+        # sample one positive
+        positem = np.random.choice(posForUser)
+        # sample one negative (not in user’s positives)
         while True:
             negitem = np.random.randint(0, dataset.m_items)
-            if negitem in posForUser:
-                continue
-            else:
+            if negitem not in posForUser:
                 break
         S.append([user, positem, negitem])
-        end = time()
-        sample_time1 += end - start
-    total = time() - total_start
+
     return np.array(S)
 
-# ===================end samplers==========================
-# =====================utils====================================
 
+# ==================== Utility helpers ====================
 def set_seed(seed):
+    """Ensure reproducibility across NumPy, Torch, CUDA"""
     np.random.seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
     torch.manual_seed(seed)
 
+
 def getFileName():
+    """
+    Construct checkpoint filename depending on model.
+    Example: lgn-amazon-book-3-128.pth.tar
+    """
     if world.model_name == 'mf':
         file = f"mf-{world.dataset}-{world.config['latent_dim_rec']}.pth.tar"
     elif world.model_name == 'lgn':
         file = f"lgn-{world.dataset}-{world.config['lightGCN_n_layers']}-{world.config['latent_dim_rec']}.pth.tar"
-    return os.path.join(world.FILE_PATH,file)
+    return os.path.join(world.PATH, file)
+
 
 def minibatch(*tensors, **kwargs):
-
+    """Yield mini-batches from given tensors"""
     batch_size = kwargs.get('batch_size', world.config['bpr_batch_size'])
-
-    if len(tensors) == 1:
-        tensor = tensors[0]
-        for i in range(0, len(tensor), batch_size):
-            yield tensor[i:i + batch_size]
-    else:
-        for i in range(0, len(tensors[0]), batch_size):
-            yield tuple(x[i:i + batch_size] for x in tensors)
+    for i in range(0, len(tensors[0]), batch_size):
+        yield tuple(x[i:i + batch_size] for x in tensors)
 
 
 def shuffle(*arrays, **kwargs):
-
+    """Shuffle arrays in unison"""
     require_indices = kwargs.get('indices', False)
-
     if len(set(len(x) for x in arrays)) != 1:
-        raise ValueError('All inputs to shuffle must have '
-                         'the same length.')
+        raise ValueError("All inputs must have same length.")
 
     shuffle_indices = np.arange(len(arrays[0]))
     np.random.shuffle(shuffle_indices)
-
-    if len(arrays) == 1:
-        result = arrays[0][shuffle_indices]
-    else:
-        result = tuple(x[shuffle_indices] for x in arrays)
-
-    if require_indices:
-        return result, shuffle_indices
-    else:
-        return result
+    result = tuple(x[shuffle_indices] for x in arrays)
+    return (result, shuffle_indices) if require_indices else result
 
 
+# ==================== Timer ====================
 class timer:
     """
-    Time context manager for code block
+    Lightweight timing utility for profiling.
+    Usage:
         with timer():
-            do something
-        timer.get()
+            do_something()
+        print(timer.get())
     """
     from time import time
-    TAPE = [-1]  # global time record
+    TAPE = [-1]
     NAMED_TAPE = {}
 
     @staticmethod
     def get():
-        if len(timer.TAPE) > 1:
-            return timer.TAPE.pop()
-        else:
-            return -1
-
-    @staticmethod
-    def dict(select_keys=None):
-        hint = "|"
-        if select_keys is None:
-            for key, value in timer.NAMED_TAPE.items():
-                hint = hint + f"{key}:{value:.2f}|"
-        else:
-            for key in select_keys:
-                value = timer.NAMED_TAPE[key]
-                hint = hint + f"{key}:{value:.2f}|"
-        return hint
-
-    @staticmethod
-    def zero(select_keys=None):
-        if select_keys is None:
-            for key, value in timer.NAMED_TAPE.items():
-                timer.NAMED_TAPE[key] = 0
-        else:
-            for key in select_keys:
-                timer.NAMED_TAPE[key] = 0
-
-    def __init__(self, tape=None, **kwargs):
-        if kwargs.get('name'):
-            timer.NAMED_TAPE[kwargs['name']] = timer.NAMED_TAPE[
-                kwargs['name']] if timer.NAMED_TAPE.get(kwargs['name']) else 0.
-            self.named = kwargs['name']
-            if kwargs.get("group"):
-                #TODO: add group function
-                pass
-        else:
-            self.named = False
-            self.tape = tape or timer.TAPE
-
-    def __enter__(self):
-        self.start = timer.time()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.named:
-            timer.NAMED_TAPE[self.named] += timer.time() - self.start
-        else:
-            self.tape.append(timer.time() - self.start)
+        return timer.TAPE.pop() if len(timer.TAPE) > 1 else -1
 
 
-# ====================Metrics==============================
-# =========================================================
+# ==================== Evaluation Metrics ====================
 def RecallPrecision_ATk(test_data, r, k):
     """
-    test_data should be a list? cause users may have different amount of pos items. shape (test_batch, k)
-    pred_data : shape (test_batch, k) NOTE: pred_data should be pre-sorted
-    k : top-k
+    Compute recall and precision at top-k.
+    test_data: ground-truth items per user
+    r: binary relevance matrix (batch x items)
     """
     right_pred = r[:, :k].sum(1)
     precis_n = k
     recall_n = np.array([len(test_data[i]) for i in range(len(test_data))])
-    recall = np.sum(right_pred/recall_n)
-    precis = np.sum(right_pred)/precis_n
+    recall = np.sum(right_pred / recall_n)
+    precis = np.sum(right_pred) / precis_n
     return {'recall': recall, 'precision': precis}
 
 
-def MRRatK_r(r, k):
+def NDCGatK_r(test_data, r, k):
     """
-    Mean Reciprocal Rank
-    """
-    pred_data = r[:, :k]
-    scores = np.log2(1./np.arange(1, k+1))
-    pred_data = pred_data/scores
-    pred_data = pred_data.sum(1)
-    return np.sum(pred_data)
-
-def NDCGatK_r(test_data,r,k):
-    """
-    Normalized Discounted Cumulative Gain
-    rel_i = 1 or 0, so 2^{rel_i} - 1 = 1 or 0
+    Normalized Discounted Cumulative Gain at top-k.
     """
     assert len(r) == len(test_data)
     pred_data = r[:, :k]
-
     test_matrix = np.zeros((len(pred_data), k))
     for i, items in enumerate(test_data):
-        length = k if k <= len(items) else len(items)
-        test_matrix[i, :length] = 1
-    max_r = test_matrix
-    idcg = np.sum(max_r * 1./np.log2(np.arange(2, k + 2)), axis=1)
-    dcg = pred_data*(1./np.log2(np.arange(2, k + 2)))
-    dcg = np.sum(dcg, axis=1)
+        test_matrix[i, :min(k, len(items))] = 1
+    idcg = np.sum(test_matrix * 1./np.log2(np.arange(2, k + 2)), axis=1)
+    dcg = np.sum(pred_data * (1./np.log2(np.arange(2, k + 2))), axis=1)
     idcg[idcg == 0.] = 1.
-    ndcg = dcg/idcg
-    ndcg[np.isnan(ndcg)] = 0.
+    ndcg = dcg / idcg
     return np.sum(ndcg)
+
 
 def AUC(all_item_scores, dataset, test_data):
     """
-        design for a single user
+    Area Under Curve: given all item scores for one user.
     """
-    dataset : BasicDataset
-    r_all = np.zeros((dataset.m_items, ))
+    r_all = np.zeros((dataset.m_items,))
     r_all[test_data] = 1
-    r = r_all[all_item_scores >= 0]
-    test_item_scores = all_item_scores[all_item_scores >= 0]
-    return roc_auc_score(r, test_item_scores)
+    return roc_auc_score(r_all, all_item_scores)
+
 
 def getLabel(groundTruth, predictTopK):
-    # --- Robust fix: always treat groundTruth as list ---
+    """Return binary labels for predicted top-K vs ground-truth set"""
     if not isinstance(groundTruth, (list, set, tuple, np.ndarray)):
         groundTruth = [groundTruth]
-    pred = list(map(lambda x: x in groundTruth, predictTopK))
+    pred = [1.0 if x in groundTruth else 0.0 for x in predictTopK]
     return np.array(pred, dtype=np.float32)
-
-
-# ====================end Metrics=============================
-# =========================================================
