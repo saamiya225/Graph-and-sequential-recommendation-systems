@@ -6,13 +6,13 @@ Popularity fusion (Pop-Gate) — blends structural item embeddings with populari
 
 Item–Item adjacency fusion — optional smoothing using a precomputed item–item graph.
 
-(Config stubs present for global smoothing / PPR; current code averages layers uniformly unless extended.)
+(Config stubs present for global smoothing / PPR; current code averages layers uniformly unless extended.) 
 
 The codebase includes training, evaluation, preprocessing (Instacart), checkpointing, and logging (CSV + TensorBoard).
 
 Model evolution:
 
-We started with the base code of LightGCN https://github.com/gusye1234/LightGCN-PyTorch.git, and implemented different versions to test our research questions. The final codebase uploaded is the last version in a sries of modifications. We went from V1 -> V2 ->V3.
+We started with the base code of LightGCN https://github.com/gusye1234/LightGCN-PyTorch.git, and implemented different versions to test our research questions. The final codebase uploaded is the last version in a sries of modifications. We went from V1 -> V2 ->V3. Current repository link is https://github.com/saamiya225/Graph-and-sequential-recommendation-systems.git, the previous versions can be tracked through the commits.
 
 Quick Start:
 1) Install
