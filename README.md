@@ -1,4 +1,4 @@
-**Limitations of User-Item Interactions in Graph Recommenders.**
+** # Limitations of User-Item Interactions in Graph Recommenders.**
 
 Lightweight experiments in graph-based recommendation centered on LightGCN, with practical extensions:
 
