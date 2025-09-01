@@ -2,11 +2,24 @@
 
 Lightweight experiments in graph-based recommendation centered on LightGCN, with practical extensions:
 
-Popularity fusion (Pop-Gate) — blends structural item embeddings with popularity-aware embeddings via a learned gate.
+Variants
 
-Item–Item adjacency fusion — optional smoothing using a precomputed item–item graph.
+V1 — Global Smoothing
+Standard LightGCN with optional global smoothing / PPR weighting.
+Scoring: dot product between user/item embeddings.
 
-(Config stubs present for global smoothing / PPR; current code averages layers uniformly unless extended.) 
+V2 — MLP Scoring
+Extends V1 with an MLP-based scoring head instead of plain dot product.
+This lets the model learn a richer interaction function.
+
+V3 — Fusion
+Extends V2 with fusion mechanisms:
+
+Popularity-aware gating (mixes item embedding + popularity embedding)
+
+Item–item adjacency smoothing
+
+Preprocessing scripts for Instacart dataset.
 
 The codebase includes training, evaluation, preprocessing (Instacart), checkpointing, and logging (CSV + TensorBoard).
 
@@ -75,7 +88,7 @@ tensorboard --logdir=code/runs
 
 What’s Inside
 LightGCN_work/
-├─ code/
+├─ code_V3_Fusion/
 │  ├─ main.py            # Entry point: training loop, resume, CSV/TensorBoard logging, Mac-safe multiprocessing guard
 │  ├─ world.py           # Global config: args → config dict, paths, device selection
 │  ├─ model.py           # LightGCN + popularity fusion (pop_mlp + gate_mlp) + optional item–item fusion
@@ -87,6 +100,9 @@ LightGCN_work/
 │  ├─ preprocess_instacart_i2i.py   # Build item–item CSR (.npz)
 │  └─ utils.py           # BPRLoss, samplers, metrics, misc helpers
 └─ requirements.txt      # Includes tensorboardX==1.8 (for logging)
+
+All others follow the same structure inside code_V1_Global_Smoothing and code_V2_MLP.
+
 
 Key ideas:
 
