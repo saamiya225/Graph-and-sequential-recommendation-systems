@@ -4,28 +4,30 @@ Lightweight experiments in graph-based recommendation centered on LightGCN, with
 
 Variants
 
+V0 - Baseline
+Standard LightGCN cloned from https://github.com/gusye1234/LightGCN-PyTorch.git.
+
 V1 — Global Smoothing
-Standard LightGCN with optional global smoothing / PPR weighting.
-Scoring: dot product between user/item embeddings.
+Extends V0 with global smoothing.
 
 V2 — MLP Scoring
-Extends V1 with an MLP-based scoring head instead of plain dot product.
+Extends V0 with an MLP-based scoring head instead of a plain dot product.
 This lets the model learn a richer interaction function.
 
 V3 — Fusion
-Extends V2 with fusion mechanisms:
+Extends V2 with fusion mechanisms-
 
 Popularity-aware gating (mixes item embedding + popularity embedding)
 
 Item–item adjacency smoothing
 
-Preprocessing scripts for Instacart dataset.
+Preprocessing scripts for the Instacart dataset.
 
 The codebase includes training, evaluation, preprocessing (Instacart), checkpointing, and logging (CSV + TensorBoard).
 
 Model evolution:
 
-We started with the base code of LightGCN https://github.com/gusye1234/LightGCN-PyTorch.git, and implemented different versions to test our research questions. The final codebase uploaded is the last version in a series of modifications. We went from V0 -> V1 -> V2 ->V3. Current repository link is https://github.com/saamiya225/Graph-and-sequential-recommendation-systems.git, the previous versions can be tracked through the commits.
+We started with the base code of LightGCN, and implemented different versions to test our research questions. The final codebase uploaded is the last version in a series of modifications. We went from V0 -> V1 -> V2 ->V3. Current repository link is https://github.com/saamiya225/Graph-and-sequential-recommendation-systems.git, the previous versions can be tracked through the commits.
 
 Quick Start:
 1) Install
