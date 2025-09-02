@@ -59,22 +59,22 @@ Build an item–item adjacency (for item fusion):
 
 python code/preprocess_instacart_i2i.py \
   --data_root ./data/instacart \
-  --topk 50 --weight jaccard
+  --topk 20
 # Result: ./data/instacart/i2i_adj.npz
 
 Train & Evaluate
 Minimal example (Gowalla)
-# From LightGCN_work/
-python code/main.py \
+# From LightGCN_work/ (for fusion variant V3)
+python code_V3_Fusion/main.py \   
   --dataset gowalla --model lgn \
-  --epochs 200 --recdim 64 --layer 3 \
-  --lr 0.001 --bpr_batch 2048 --testbatch 100
+  --epochs 1000 --recdim 128 --layer 4 \
+  --lr 0.0001 --bpr_batch 2048 
 
 With extensions
 # Popularity fusion + item–item fusion
 python code/main.py \
   --dataset gowalla --model lgn \
-  --epochs 1000 --recdim 128 --layer 3 \
+  --epochs 1000 --recdim 128 --layer 4 \
   --use_item_item --i2i_path ./data/gowalla/i2i_adj.npz --i2i_alpha 0.1
 
 
@@ -104,7 +104,7 @@ LightGCN_work/
 All others follow the same structure inside code_V1_Global_Smoothing and code_V2_MLP.
 
 
-Key ideas:
+Key ideas for final variant V3: 
 
 LightGCN propagation: uniform neighbor “hops” for n_layers, then layer-mean aggregation.
 
@@ -118,13 +118,12 @@ Learn a gate sigmoid(gate_mlp([item_emb, pop_vec])) to mix structural vs popular
 
 Item–Item fusion: post-propagation, optionally smooth item embeddings with i2i_adj (CSR) weighted by i2i_alpha.
 
-Global smoothing / PPR- flags exist in config/args. Current code averages layers uniformly unless you add weighting logic. The PPR model did not work well, and so it was scrapped from the final version.
 
 Common Flags-
 
 Model / training: --model lgn, --epochs, --recdim, --layer, --lr, --decay
 
-Batches: --bpr_batch, --test_u_batch_size
+Batches: --bpr_batch
 
 Logging: --tensorboard 1, --comment your_note
 
