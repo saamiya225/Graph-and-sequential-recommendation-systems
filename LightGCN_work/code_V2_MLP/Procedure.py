@@ -1,43 +1,161 @@
-# register.py — dataset + model registry (robust)
+"""
+Procedure.py — V2 (MLP Scoring)
 
+- [train] One BPR epoch: sample (u, pos, neg), compute BPR + reg via model's scorer (MLP+blend), step optimizer
+- [eval] Compute Precision/Recall/NDCG@K with masking of seen items; aggregate across users
+- [log] Persist metrics to CSV (train_epoch_metrics.csv / valid_epoch_metrics.csv) and TensorBoard (if enabled)
+
+"""
+
+import os
+import csv
 import world
-import model
-from world import cprint
+import numpy as np
+import torch
+import utils
+import dataloader
+from utils import timer
+import multiprocessing
 
-print("comment:", world.comment)
-print("tensorboard:", world.tensorboard)
-print("LOAD:", world.LOAD)
-print("Weight path:", world.PATH)
+CORES = multiprocessing.cpu_count() // 2
 
-# ---- Dataset ----
-# Use the concrete loader; BasicDataset is abstract and will raise NotImplementedError.
-try:
-    from dataloader import Loader
-except ImportError as e:
-    raise ImportError(
-        "Your dataloader.py must define a concrete Loader class. "
-        "BasicDataset is abstract and cannot be instantiated."
-    ) from e
+# [train] One epoch of BPR training using the model's active scoring path
+def BPR_train_original(dataset, recommend_model, loss_class, epoch, neg_k=1, w=None):
+    Recmodel = recommend_model
+    Recmodel.train()
+    bpr: utils.BPRLoss = loss_class
 
-# Try the two common constructor signatures
-try:
-    dataset = Loader(world.config)   # many forks accept config
-except TypeError:
-    dataset = Loader()               # some forks are arg-less and read world.config internally
+    # [sample] Uniformly sample (user, pos, neg) triplets for BPR
+    with timer(name="Sample"):
+        S = utils.UniformSample_original(dataset)
+    users    = torch.Tensor(S[:, 0]).long().to(world.device)
+    posItems = torch.Tensor(S[:, 1]).long().to(world.device)
+    negItems = torch.Tensor(S[:, 2]).long().to(world.device)
+    users, posItems, negItems = utils.shuffle(users, posItems, negItems)
 
-# ---- Model registry (only add what exists) ----
-MODELS = {}
+    total_batch = len(users) // world.config['bpr_batch_size'] + 1
+    aver_loss = 0.0
+    for batch_i, (u, p, n) in enumerate(utils.minibatch(
+            users, posItems, negItems,
+            batch_size=world.config['bpr_batch_size'])):
+        # [step] Forward + backward (one minibatch) → returns BPR loss
+        cri = bpr.stageOne(u, p, n)
+        aver_loss += cri
+        if world.tensorboard and w is not None:
+            w.add_scalar('BPRLoss/BPR', cri, epoch * total_batch + batch_i)
+    aver_loss /= total_batch
 
-if hasattr(model, 'PureMF'):
-    MODELS['mf'] = model.PureMF
-
-if hasattr(model, 'LightGCN'):
-    MODELS['lgn'] = model.LightGCN
-
-# Sanity check for the requested model
-if world.model_name not in MODELS:
-    raise ValueError(
-        f"Requested model '{world.model_name}' is not available. "
-        f"Available models: {list(MODELS.keys())}. "
-        f"Ensure model.py defines the class, or run with --model one of {list(MODELS.keys())}."
+    # ——— LOG TRAINING LOSS TO CSV ———
+    save_path = world.config.get(
+        'path',
+        world.config.get('checkpoint_dir', './checkpoints')
     )
+    os.makedirs(save_path, exist_ok=True)
+    train_csv = os.path.join(save_path, 'train_epoch_metrics.csv')
+    if not os.path.exists(train_csv):
+        with open(train_csv, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['epoch', 'loss'])
+    with open(train_csv, 'a', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow([epoch, aver_loss])
+    # ————————————————————————————————
+
+    time_info = timer.dict()
+    timer.zero()
+    return f"loss{aver_loss:.3f}-{time_info}"
+
+def test_one_batch(X):
+    sorted_items = X[0].cpu().numpy()
+    groundTrue  = X[1]
+    if not isinstance(groundTrue, (list, set, tuple, np.ndarray)):
+        groundTrue = [groundTrue]
+    # Now always batch-of-one
+    test_data = [groundTrue]
+    r = utils.getLabel(groundTrue, sorted_items)
+    r = np.expand_dims(r, axis=0)  # [1, topk]
+
+    pre, recall, ndcg = [], [], []
+    for k in world.topks:
+        ret = utils.RecallPrecision_ATk(test_data, r, k)
+        pre.append(ret['precision'])
+        recall.append(ret['recall'])
+        ndcg.append(utils.NDCGatK_r(test_data, r, k))
+    return {'precision': np.array(pre),
+            'recall':    np.array(recall),
+            'ndcg':      np.array(ndcg)}
+
+# [eval] Full evaluation pass: get top-K per user and compute metrics
+def Test(dataset, Recmodel, epoch, w=None, multicore=0):
+    import multiprocessing, sys
+    from world import CORES
+    u_batch_size = world.config['test_u_batch_size']
+    testDict     = dataset.testDict
+    Recmodel     = Recmodel.eval()
+    max_K        = max(world.topks)
+
+    pool = None
+    if multicore == 1:
+        try:
+            # Prefer 'fork' on macOS to avoid spawn recursion
+            ctx = multiprocessing.get_context('fork') if sys.platform == 'darwin' else multiprocessing
+            pool = ctx.Pool(CORES)
+        except Exception as e:
+            print(f"[WARN] Multiprocessing disabled for eval due to: {e}")
+            pool = None
+            multicore = 0
+
+    results = {'precision': np.zeros(len(world.topks)),
+               'recall':    np.zeros(len(world.topks)),
+               'ndcg':      np.zeros(len(world.topks))}
+
+    with torch.no_grad():
+        users = list(testDict.keys())
+        total_batch = len(users) // u_batch_size + 1
+        batch_result = []
+        for batch_users in utils.minibatch(users, batch_size=u_batch_size):
+            allPos     = dataset.getUserPosItems(batch_users)
+            groundTrue = [testDict[u] for u in batch_users]
+            # Ensure every groundTruth is a list (or set/tuple), even if only one item
+            groundTrue = [gt if isinstance(gt, (list, set, tuple)) else [gt] for gt in groundTrue]
+            batch_gpu  = torch.Tensor(batch_users).long().to(world.device)
+
+            rating_K = Recmodel.getUsersRating(batch_gpu)
+            # [mask] Exclude items the user has already interacted with
+            exclude_idx, exclude_items = [], []
+            for i, items in enumerate(allPos):
+                exclude_idx.extend([i] * len(items))
+                exclude_items.extend(items)
+            rating_K[exclude_idx, exclude_items] = -(1 << 10)
+
+            _, topk = torch.topk(rating_K, k=max_K)
+            # Loop over each user in the batch
+            for i, u in enumerate(batch_users):
+                X = (topk[i], groundTrue[i])
+                batch_result.append(test_one_batch(X))
+
+        # [aggregate] Average metrics across evaluated users
+        for metric in results.keys():
+            results[metric] = np.mean([r[metric] for r in batch_result], axis=0)
+
+    # ——— LOG VALIDATION METRICS TO CSV ———
+    save_path = world.config.get(
+        'path',
+        world.config.get('checkpoint_dir', './checkpoints')
+    )
+    os.makedirs(save_path, exist_ok=True)
+    valid_csv = os.path.join(save_path, 'valid_epoch_metrics.csv')
+    if not os.path.exists(valid_csv):
+        with open(valid_csv, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['epoch', 'precision', 'recall', 'ndcg'])
+    prec = float(results['precision'][0])
+    rec  = float(results['recall'][0])
+    nd   = float(results['ndcg'][0])
+    with open(valid_csv, 'a', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow([epoch, prec, rec, nd])
+    # ————————————————————————————————
+
+    print(results)
+    return results

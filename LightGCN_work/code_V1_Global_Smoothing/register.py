@@ -1,3 +1,13 @@
+
+"""
+register.py — V1 (Global Smoothing)
+
+- Import a concrete dataset Loader (not the abstract BasicDataset)
+- Instantiate the dataset (config-aware if your Loader supports it)
+- Register available models (e.g., 'lgn' for LightGCN, 'mf' if PureMF present)
+- Validate that the requested `world.model_name` exists in the registry
+"""
+
 import world
 import dataloader
 import model

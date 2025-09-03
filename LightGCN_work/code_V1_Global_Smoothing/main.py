@@ -1,3 +1,14 @@
+
+"""
+main.py — V1 (Global Smoothing)
+
+- Entrypoint for training/evaluation
+- Build model + BPR loss (+ optimizer, optional scheduler)
+- Resume from checkpoints if requested
+- Training loop across epochs; periodic evaluation (Precision/Recall/NDCG@K)
+- Write metrics to CSV and TensorBoard (if enabled)
+"""
+
 import world
 import utils
 from world import cprint

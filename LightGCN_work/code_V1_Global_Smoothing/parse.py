@@ -1,10 +1,16 @@
-'''
-Created on Mar 1, 2020
-Pytorch Implementation of LightGCN in
-Xiangnan He et al. LightGCN: Simplifying and Powering Graph Convolution Network for Recommendation
+"""
+parse.py — V1 (Global Smoothing)
 
-@author: Jianbai Ye (gusye@mail.ustc.edu.cn)
-'''
+- Defines CLI arguments for LightGCN baseline:
+    * Core hyperparameters: bpr_batch, recdim, layer, lr, decay, epochs, testbatch
+    * Dataset/paths/logging: dataset, checkpoint_dir, topks, tensorboard, comment, seed
+    * Graph options: a_fold, A_split
+- Optional global smoothing hooks:
+    * exp_smooth_beta (e.g., exponential smoothing of layer contributions)
+    * use_ppr_weights / ppr_weights_path (if you implement PPR-based layer weights)
+- Optional scheduler args (not required by default)
+"""
+
 import argparse
 
 

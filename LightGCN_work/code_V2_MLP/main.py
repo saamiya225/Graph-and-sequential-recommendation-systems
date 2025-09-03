@@ -1,4 +1,11 @@
-# main.py — same logic as before, but safely guarded for multiprocessing on macOS
+"""
+main.py — V2 (MLP Scoring)
+
+- Standard training loop (BPR) + periodic evaluation.
+- Model scoring = MLP by default; final score is a blend:
+    score = (1 - residual_alpha) * mlp_score + residual_alpha * dot_score
+- Logs to CSV and TensorBoard (if enabled).
+"""
 
 import os, time, ast, csv
 import torch

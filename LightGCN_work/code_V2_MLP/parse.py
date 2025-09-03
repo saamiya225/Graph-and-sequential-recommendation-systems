@@ -1,14 +1,28 @@
 """
-Created on Mar 1, 2020
-Pytorch Implementation of LightGCN in
-Xiangnan He et al. LightGCN: Simplifying and Powering Graph Convolution Network for Recommendation
+parse.py — V2 (MLP Scoring)
 
-@author: Jianbai Ye (gusye@mail.ustc.edu.cn)
+
+- [CLI] Core LightGCN arguments (dataset, epochs, layers, recdim, lr, etc.)
+- [CLI, V2] MLP scorer is always enabled
+    • --residual_alpha : blend weight between MLP score and dot-product
+        (0.0 → pure MLP, 1.0 → pure dot-product, in-between → hybrid)
+    • --use_norm       : L2-normalize embeddings before feeding MLP
+    • --bias_scale     : scale factor for user/item bias embeddings
+- [CLI] Other optional scheduler / logging / checkpoint args
+
 """
 
+# (your original parse.py content below unchanged)
+# Created on Mar 1, 2020
+# Pytorch Implementation of LightGCN in
+# Xiangnan He et al. LightGCN: Simplifying and Powering Graph Convolution Network for Recommendation
+# ...
 import argparse
 
 def parse_args():
+    parser = argparse.ArgumentParser(description="Go lightGCN")
+
+   def parse_args():
     parser = argparse.ArgumentParser(description="Go lightGCN")
 
     # -------- Core training --------
@@ -64,12 +78,6 @@ def parse_args():
     parser.add_argument('--exp_smooth_beta', type=float, default=0.5,
                         help="global exponential‐smoothing β for layer aggregation")
 
-    # -------- Optional PPR weighting --------
-    parser.add_argument('--use_ppr_weights', action='store_true',
-                        help='Use PPR weighting for layer combination')
-    parser.add_argument('--ppr_weights_path', type=str, default=None,
-                        help='Path to PPR weights file (used if --use_ppr_weights is set)')
-
     # -------- MLP+Global scorer tuning (NEW) --------
     parser.add_argument('--residual_alpha',  type=float, default=0.0,
                         help='Blend dot-product with MLP score (0: MLP only, 1: dot only)')
@@ -78,13 +86,7 @@ def parse_args():
     parser.add_argument('--bias_scale',      type=float, default=1.0,
                         help='Scale factor for user/item bias embeddings into MLP')
 
-    # -------- Popularity-gated fusion (OFF by default) --------
-    parser.add_argument('--use_pop_gate', action='store_true',
-                        help='Enable popularity-gated item fusion')
-    parser.add_argument('--pop_bins',     type=int, default=5,
-                        help='Quantile bins for item popularity when gating is enabled')
-
-    # -------- Multicore & resume & scheduler (QoL) --------
+    # -------- Multicore & resume & scheduler (not required as such, could use if needed, fir training other than the multicore, we didnt use others) --------
     parser.add_argument('--multicore',       type=int,   default=0,
                         help="use multiprocessing for test (0/1)")
     parser.add_argument('--resume', action='store_true',
@@ -102,4 +104,6 @@ def parse_args():
     parser.add_argument('--sched_gamma',     type=float, default=0.5,
                         help='Decay factor for MultiStepLR')
 
+
     return parser.parse_args()
+

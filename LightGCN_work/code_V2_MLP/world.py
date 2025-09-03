@@ -1,5 +1,13 @@
-# world.py — central config + globals expected across the repo
+"""
+world.py — V2 (MLP Scoring)
 
+- Builds the global config from CLI args.
+- Includes MLP scorer knobs:
+    • residual_alpha : blend MLP with dot-product (0.0→MLP, 1.0→dot)
+    • use_norm       : L2-normalize emb before MLP
+    • bias_scale     : scale factor for bias embeddings into MLP
+- Sets device and common paths (CODE_PATH, DATA_PATH, BOARD_PATH).
+"""
 import os, sys, ast, multiprocessing
 from os.path import dirname, join
 from parse import parse_args

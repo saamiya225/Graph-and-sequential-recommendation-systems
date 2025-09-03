@@ -1,10 +1,11 @@
-'''
-Created on Mar 1, 2020
-Pytorch Implementation of LightGCN in
-Xiangnan He et al. LightGCN: Simplifying and Powering Graph Convolution Network for Recommendation
+"""
+world.py — V1 (Global Smoothing)
 
-@author: Jianbai Ye (gusye@mail.ustc.edu.cn)
-'''
+- Parse CLI args via parse.py
+- Build global config dict (training, dataset, optimizer hyperparams, etc.)
+- Define root paths: CODE_PATH, DATA_PATH, BOARD_PATH
+- Set random seed and device (CPU/GPU)
+- Expose globals used elsewhere (e.g., model_name, epochs, topks"""
 
 import os
 from os.path import join

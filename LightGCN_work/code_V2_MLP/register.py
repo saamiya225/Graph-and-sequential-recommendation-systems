@@ -1,12 +1,10 @@
 """
-register.py — Dataset & model registry (robust variant)
+register.py — V2 (MLP Scoring)
 
-- Print run-time flags from `world` for quick visibility
-- Import a concrete dataset loader (`Loader`) from dataloader.py
-- Instantiate the dataset (supports both Loader(config) and Loader())
-- Build a MODEL registry from classes present in model.py
-- Validate that the requested model (world.model_name) exists
+- Instantiates dataset (Loader) and registers LightGCN model for V2.
+- Ensures requested model key exists.
 """
+
 
 import world
 import model
