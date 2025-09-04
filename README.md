@@ -89,21 +89,21 @@ Launch TensorBoard:
 tensorboard --logdir=code/runs
 
 What’s Inside
-'''
+```
 LightGCN_work/
 ├─ code_V3_Fusion/
-│  ├─ main.py            # Entry point: training loop, resume, CSV/TensorBoard logging, Mac-safe multiprocessing guard
+│  ├─ main.py            # Training loop, resume, CSV/TensorBoard logging, Mac-safe multiprocessing guard
 │  ├─ world.py           # Global config: args → config dict, paths, device selection
 │  ├─ model.py           # LightGCN + popularity fusion (pop_mlp + gate_mlp) + optional item–item fusion
-│  ├─ Procedure.py       # Epoch train (BPR), eval (Precision/Recall/NDCG), CSV writers
-│  ├─ parse.py           # CLI arguments (batch sizes, layers, pop-gate flags, item–item flags, etc.)
-│  ├─ register.py        # Dataset loader & model registry; sanity checks
-│  ├─ dataloader.py      # Dataset abstraction; provides sparse graph & splits
+│  ├─ Procedure.py       # Train (BPR), eval (Precision/Recall/NDCG), CSV writers
+│  ├─ parse.py           # CLI arguments (batch sizes, layers, pop-gate, item–item flags, etc.)
+│  ├─ register.py        # Dataset loader & model registry
+│  ├─ dataloader.py      # Dataset abstraction; sparse graph & splits
 │  ├─ prepare_instacart.py          # Instacart → LightGCN train/test
 │  ├─ preprocess_instacart_i2i.py   # Build item–item CSR (.npz)
 │  └─ utils.py           # BPRLoss, samplers, metrics, misc helpers
-└─ requirements.txt      # Includes tensorboardX==1.8 (for logging)
-'''
+└─ requirements.txt      # Includes tensorboardX==1.8
+```
 All others follow the same structure inside code_V1_Global_Smoothing and code_V2_MLP.
 
 
