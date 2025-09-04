@@ -27,7 +27,7 @@ The codebase includes training, evaluation, preprocessing (Instacart), checkpoin
 
 Model evolution:
 
-We started with the base code of LightGCN, and implemented different versions to test our research questions. The final codebase uploaded is the last version in a series of modifications. We went from V0 -> V1 -> V2 ->V3. Current repository link is https://github.com/saamiya225/Graph-and-sequential-recommendation-systems.git, the previous versions can be tracked through the commits.
+We started with the base code of LightGCN, and implemented different versions to test our research questions. We went from V0 -> V1 -> V2 ->V3. The repository has all the 4 variants that we tested.
 
 Quick Start:
 1) Install
