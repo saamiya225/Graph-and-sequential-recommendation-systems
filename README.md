@@ -89,6 +89,7 @@ Launch TensorBoard:
 tensorboard --logdir=code/runs
 
 What’s Inside
+'''
 LightGCN_work/
 ├─ code_V3_Fusion/
 │  ├─ main.py            # Entry point: training loop, resume, CSV/TensorBoard logging, Mac-safe multiprocessing guard
@@ -102,7 +103,7 @@ LightGCN_work/
 │  ├─ preprocess_instacart_i2i.py   # Build item–item CSR (.npz)
 │  └─ utils.py           # BPRLoss, samplers, metrics, misc helpers
 └─ requirements.txt      # Includes tensorboardX==1.8 (for logging)
-
+'''
 All others follow the same structure inside code_V1_Global_Smoothing and code_V2_MLP.
 
 
