@@ -59,7 +59,7 @@ python code_V3_Fusion/prepare_instacart.py \
 
 Build an item–item adjacency (for item fusion):
 
-python code/preprocess_instacart_i2i.py \
+python code_V3_Fusion/preprocess_instacart_i2i.py \
   --data_root ./data/instacart \
   --topk 20
 # Result: ./data/instacart/i2i_adj.npz
