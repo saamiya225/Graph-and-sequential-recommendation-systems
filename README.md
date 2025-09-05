@@ -74,7 +74,7 @@ python code_V3_Fusion/main.py \
 
 With extensions
 # Popularity fusion + item–item fusion
-python code/main.py \
+python code_V3_Fusion/main.py \
   --dataset gowalla --model lgn \
   --epochs 1000 --recdim 128 --layer 4 \
   --use_item_item --i2i_path ./data/gowalla/i2i_adj.npz --i2i_alpha 0.1
