@@ -52,7 +52,7 @@ data/<dataset>/test.txt — same format (usually the last interaction(s) per use
 Convert raw Instacart CSVs → LightGCN text files:
 
 # From LightGCN_work/
-python code/prepare_instacart.py \
+python code_V3_Fusion/prepare_instacart.py \
   --raw_dir ./data/instacart/raw \   (We haven't kept the raw folder in the git repo because of data size issue|)
   --out_dir ./data/instacart
 
@@ -107,7 +107,31 @@ LightGCN_work/
 All others follow the same structure inside code_V1_Global_Smoothing and code_V2_MLP.
 
 
-Key ideas for final variant V3: 
+Key ideas for all Variants:
+
+V0 — Baseline (LightGCN)
+
+Bipartite user–item graph; L-hop neighborhood propagation with layer-wise averaging.
+
+Final embedding = mean of all layer embeddings; score = user·item dot product.
+
+Optimized with BPR loss; serves as the reproducible reference.
+
+V1 — Global Smoothing
+
+Adds a global smoothing term on top of LightGCN’s layer aggregation to reduce overfitting and amplify common structure.
+
+Controlled by a single strength hyperparameter; leaves training/eval protocol unchanged so results are comparable to V0.
+
+V2 — MLP Scoring (with optional residual blend)
+
+Replaces the plain dot product with a small MLP that learns a richer interaction function.
+
+Optionally blends scores: score = (1−α)·dot + α·MLP, where α is a simple scalar (e.g., --residual_alpha).
+
+Same data splits/metrics as V0/V1 for apples-to-apples comparisons.
+
+V3 - Fusion
 
 LightGCN propagation: uniform neighbor “hops” for n_layers, then layer-mean aggregation.
 
@@ -117,7 +141,7 @@ Build a log-scaled, normalized popularity scalar per item.
 
 Map it via pop_mlp to the embedding space.
 
-Learn a gate sigmoid(gate_mlp([item_emb, pop_vec])) to mix structural vs popularity signals.
+Learn a gate sigmoid(gate_mlp ([item_emb, pop_vec])) to mix structural vs popularity signals.
 
 Item–Item fusion: post-propagation, optionally smooth item embeddings with i2i_adj (CSR) weighted by i2i_alpha.
 
